@@ -3,10 +3,12 @@ Auth router for InvoiceAI.
 
 BUG-06: JWT refresh tokens + 60 min access token + httpOnly cookie.
 """
+import os
 import hashlib
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import UserCreate, UserResponse, TokenResponse
@@ -21,6 +23,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(user_in: UserCreate, db: Session = Depends(get_db)):
+    # Fast-path check: catches most duplicates cheaply without hitting the DB constraint.
     existing_user = db.query(User).filter(User.email == user_in.email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -31,7 +34,16 @@ def register(user_in: UserCreate, db: Session = Depends(get_db)):
         api_key=generate_api_key(),
     )
     db.add(new_user)
-    db.commit()
+
+    # BUG-D4: Catch IntegrityError from the DB-level UNIQUE constraint.
+    # This closes the race condition where two concurrent registrations both pass
+    # the app-level check above before either has committed.
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Email already registered")
+
     db.refresh(new_user)
     return new_user
 
@@ -62,6 +74,10 @@ def login(
     user.refresh_token_hash = hash_token(refresh_token)
     db.commit()
 
+    # BUG-B2: secure flag is automatic — never a hardcoded False that someone
+    # can forget to update. True in production (HTTPS required), False in dev.
+    _secure_cookie = os.getenv("ENVIRONMENT", "dev") == "production"
+
     # Set refresh token as httpOnly cookie (not accessible via JS)
     response.set_cookie(
         key="refresh_token",
@@ -69,7 +85,7 @@ def login(
         httponly=True,
         samesite="strict",
         max_age=7 * 24 * 3600,  # 7 days
-        secure=False,  # Set to True in production with HTTPS
+        secure=_secure_cookie,
         path="/auth",  # Only sent to /auth endpoints
     )
 

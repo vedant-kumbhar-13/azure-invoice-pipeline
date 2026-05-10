@@ -38,7 +38,7 @@ export const InvoiceDetailPage = () => {
 
   const renderField = (label: string, field: any, isCurrency = false) => {
     const isLowConfidence = field?.confidence !== undefined && field.confidence < 0.60 && field.confidence !== null;
-    const valueStr = isCurrency ? formatCurrency(field?.value) : (field?.value || '—');
+    const valueStr = isCurrency ? formatCurrency(field?.value) : (field?.value ?? '—');
     const scorePct = field?.confidence !== undefined && field.confidence !== null ? Math.round(field.confidence * 100) : null;
     
     let confColor = 'bg-ink-300';
@@ -64,9 +64,8 @@ export const InvoiceDetailPage = () => {
   };
 
   const isReviewNeeded = ['NEEDS_REVIEW', 'HUMAN_REQUIRED'].includes(invoice.status?.toUpperCase() || '');
-  // VUL-01: Lock SAS URL on first valid value to prevent polling from changing
-  // the iframe src and triggering repeated downloads.
-  const freshFileUrl = invoice.file_url_sas || resolveFileUrl(invoice.file_url);
+  // BUG-C3: file_url_sas is now the only file URL — backend no longer returns raw blob name.
+  const freshFileUrl = invoice.file_url_sas || '';
   if (freshFileUrl && !lockedFileUrl.current) lockedFileUrl.current = freshFileUrl;
   const fileUrl = lockedFileUrl.current;
   const isPDF = invoice.original_filename?.toLowerCase().endsWith('.pdf');

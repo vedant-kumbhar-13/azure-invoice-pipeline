@@ -10,8 +10,12 @@ class Invoice(Base):
     user_id = Column(String(36), ForeignKey("users.id"))
     status = Column(String, default="processing")
     original_filename = Column(String)
-    # VUL-01: This column stores the blob_name (e.g. "abc123.pdf"), NOT a full URL.
-    # SAS URLs are generated on-demand via get_blob_sas_url(). Column name kept to avoid migration.
+    # BUG-D2: TECH DEBT — this column stores a blob_name (e.g. "a1b2c3d4.pdf"),
+    # NOT a URL. The column name is kept as file_url to avoid a data migration
+    # right now, but a future migration should:
+    #   1. op.alter_column('invoices', 'file_url', new_column_name='blob_name')
+    #   2. Update all references in blob_storage.py, invoices.py, processing_pipeline.py
+    # SAS URLs are generated on-demand via get_blob_sas_url(); never store them.
     file_url = Column(String)
     raw_json = Column(Text)
     data_json = Column(JSON)

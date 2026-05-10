@@ -8,7 +8,13 @@ FIELD_WEIGHTS = {
     "line_items": 2,
     "vendor_name": 1,
     "buyer_name": 1,
+    "buyer_gstin": 1,
     "subtotal": 1,
+    # Tax fields weighted at 1 — many legitimate Indian invoice types
+    # (Bills of Supply, exempt goods, zero-rated exports) have no tax.
+    "cgst": 1,
+    "sgst": 1,
+    "igst": 1,
 }
 
 def _get_field_confidence(field_name: str, field_data: Any) -> float:
@@ -37,6 +43,10 @@ def compute_confidence(mapped_data: dict) -> dict:
     """
     Computes a weighted confidence score for a mapped invoice and returns
     its routing status based on predefined thresholds.
+
+    Tax field handling: An invoice uses EITHER CGST+SGST (intra-state) OR
+    IGST (inter-state), never both. We detect the tax regime and only score
+    the applicable fields so that correctly-null fields don't drag the score.
     """
     total_weight = 0
     weighted_sum = 0.0
@@ -50,7 +60,40 @@ def compute_confidence(mapped_data: dict) -> dict:
             "field_scores": {}
         }
     
+    # Determine which tax fields to include in scoring.
+    # Indian GST tax regimes:
+    #   Intra-state: CGST + SGST present (even if 0) → skip IGST
+    #   Inter-state: IGST present (even if 0) → skip CGST/SGST
+    #   No tax data: all null → skip all tax fields (Bill of Supply / exempt)
+    igst_data = mapped_data.get("igst")
+    cgst_data = mapped_data.get("cgst")
+    sgst_data = mapped_data.get("sgst")
+    
+    igst_val = igst_data.get("value") if isinstance(igst_data, dict) else igst_data
+    cgst_val = cgst_data.get("value") if isinstance(cgst_data, dict) else cgst_data
+    sgst_val = sgst_data.get("value") if isinstance(sgst_data, dict) else sgst_data
+    
+    # "Present" = extracted (even if 0). "Absent" = null/not extracted.
+    igst_present = igst_val is not None
+    csgst_present = cgst_val is not None or sgst_val is not None
+    any_tax_present = igst_present or csgst_present
+    
+    # Fields to skip based on detected tax regime
+    skip_fields = set()
+    if not any_tax_present:
+        # No tax data at all — Bill of Supply, exempt, or Azure didn't extract.
+        # Skip all tax fields to avoid penalizing legitimate no-tax invoices.
+        skip_fields = {"cgst", "sgst", "igst"}
+    elif csgst_present and not igst_present:
+        skip_fields = {"igst"}               # Intra-state: CGST+SGST (skip IGST)
+    elif igst_present and not csgst_present:
+        skip_fields = {"cgst", "sgst"}        # Inter-state: IGST only
+    # If both present, score all (unusual — possible error)
+    
     for field, weight in FIELD_WEIGHTS.items():
+        if field in skip_fields:
+            continue
+        
         # Only consider fields that exist as keys in the mapped data
         if field in mapped_data:
             data = mapped_data[field]
@@ -59,6 +102,7 @@ def compute_confidence(mapped_data: dict) -> dict:
             field_scores[field] = confidence
             total_weight += weight
             weighted_sum += (confidence * weight)
+
             
     overall_score = 0.0
     if total_weight > 0:

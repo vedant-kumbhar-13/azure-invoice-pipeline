@@ -213,9 +213,10 @@ def detect_gst_qr(file_input: Union[bytes, str], filename: str) -> Optional[dict
     """Scans a document for a GST e-Invoice QR code.
 
     Pipeline:
-        1. Download file (if URL given) — capped at 5 MB (VUL-03)
-        2. Render to image(s) — first 3 pages of PDF, or the image itself
-        3. For each page, try 3 decoder layers × 4 preprocessing variants
+        0. Extension pre-check — skip unsupported formats before downloading (BUG-C5)
+        1. Download file (if URL) — capped at 1 MB for PDFs, 5 MB for images (BUG-C5)
+        2. Render to image(s) — first page of PDF, or the image itself
+        3. For each page, try 3 decoder layers x 4 preprocessing variants
         4. Parse decoded text as JWT or JSON (GST e-Invoice formats)
 
     Args:
@@ -233,6 +234,24 @@ def detect_gst_qr(file_input: Union[bytes, str], filename: str) -> Optional[dict
         - Pillow pixel limit enforced (BUG-18)
         - DecompressionBombError caught and quarantined
     """
+    safe_name = filename[:50]  # BUG-18: Never log full path
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    # ── BUG-C5: Step 0 — Extension pre-check ─────────────────────────────────
+    # Reject formats that can never contain a GST QR code before any download.
+    # Saves full Azure egress cost on every audio/video/archive/doc upload.
+    _SUPPORTED_EXTS = {"pdf", "jpg", "jpeg", "png", "tiff", "bmp", "gif", "webp"}
+    if ext not in _SUPPORTED_EXTS:
+        logger.info(f"[qr] Skipping QR scan — unsupported extension '{ext}': {safe_name}")
+        return None
+
+    # ── BUG-C5: Per-format download cap ──────────────────────────────────────
+    # GST e-Invoice QR codes always appear on the first page.
+    # PDFs: 1 MB is sufficient for the first page at any normal DPI.
+    # Images: keep the original 5 MB cap (full image needed for scan).
+    _pdf_cap = 1 * 1024 * 1024   # 1 MB
+    _img_cap = _MAX_DOWNLOAD_BYTES  # 5 MB
+
     try:
         from PIL import Image, ImageFile
         import cv2
@@ -244,15 +263,30 @@ def detect_gst_qr(file_input: Union[bytes, str], filename: str) -> Optional[dict
 
         # ── Step 1: Resolve input to bytes ───────────────────────────────────
         if isinstance(file_input, str):
-            logger.info("[qr] Downloading file for QR detection")
-            file_bytes = _download_file_bytes(file_input)
+            cap = _pdf_cap if ext == "pdf" else _img_cap
+            logger.info(f"[qr] Downloading file for QR detection (cap={cap // 1024} KB)")
+
+            def _capped_download(url: str, download_cap: int) -> Optional[bytes]:
+                try:
+                    resp = http_requests.get(url, stream=True, timeout=15)
+                    resp.raise_for_status()
+                    chunks, total = [], 0
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= download_cap:
+                            logger.info(f"[qr] Download cap reached — truncating at {download_cap // 1024} KB")
+                            break
+                    return b"".join(chunks)
+                except Exception as dl_err:
+                    logger.warning(f"[qr] Failed to download file: {type(dl_err).__name__}")
+                    return None
+
+            file_bytes = _capped_download(file_input, cap)
             if file_bytes is None:
                 return None
         else:
             file_bytes = file_input
-
-        safe_name = filename[:50]  # BUG-18: Never log full path
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
         # ── Step 2: Render document to images ────────────────────────────────
         images: list[Image.Image] = []

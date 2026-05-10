@@ -9,16 +9,18 @@ export const apiClient = axios.create({
   }
 });
 
-// Request interceptor — attach JWT
+// ── Request interceptor — attach JWT from memory store ───────────────────────
+// BUG-B3: Token is read from Zustand state, NOT localStorage.
 apiClient.interceptors.request.use((config) => {
-  const token = localStorage.getItem('invoiceai_token');
+  const token = useAuthStore.getState().token;
   if (token && config.headers) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   return config;
 });
 
-// BUG-06: Response interceptor with silent refresh on 401
+// ── Response interceptor — silent refresh on 401 ─────────────────────────────
+// BUG-06: Refresh using the httpOnly cookie; no localStorage reads/writes.
 let isRefreshing = false;
 let failedQueue: Array<{
   resolve: (value?: unknown) => void;
@@ -71,12 +73,13 @@ apiClient.interceptors.response.use(
         );
 
         const newToken = refreshRes.data.access_token;
-        localStorage.setItem('invoiceai_token', newToken);
-
-        // Update store with new token
         const user = refreshRes.data.user;
+
+        // BUG-B3: Write to Zustand memory ONLY — never localStorage
         if (user) {
           useAuthStore.getState().login(newToken, user);
+        } else {
+          useAuthStore.getState().setToken(newToken);
         }
 
         processQueue(null, newToken);
@@ -97,3 +100,29 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// ── BUG-B3: Silent refresh on page load ──────────────────────────────────────
+// Since the access token is no longer in localStorage, we must recover it from
+// the httpOnly refresh-token cookie every time the page loads.
+// This runs once at module load (before any component mounts) and marks the
+// store as hydrated when done so ProtectedRoute can make a correct decision.
+(async () => {
+  try {
+    const refreshRes = await axios.post(
+      `${apiClient.defaults.baseURL}/auth/refresh`,
+      {},
+      { withCredentials: true }
+    );
+    const newToken = refreshRes.data.access_token;
+    const user = refreshRes.data.user;
+    if (user) {
+      useAuthStore.getState().login(newToken, user);
+    } else {
+      useAuthStore.getState().setToken(newToken);
+    }
+  } catch {
+    // No valid refresh token cookie — user is not logged in.
+    // Mark as hydrated so ProtectedRoute redirects cleanly to /login.
+    useAuthStore.setState({ isHydrated: true, isAuthenticated: false });
+  }
+})();

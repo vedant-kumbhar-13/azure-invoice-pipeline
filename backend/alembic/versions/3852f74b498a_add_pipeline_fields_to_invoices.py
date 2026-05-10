@@ -1,8 +1,12 @@
 """add_pipeline_fields_to_invoices
 
 Revision ID: 3852f74b498a
-Revises: eaeb574c5dc3
+Revises: 3ea0a8e64e36
 Create Date: 2026-04-03 22:27:02.460269
+
+BUG-D1: down_revision updated from eaeb574c5dc3 to 3ea0a8e64e36.
+The two intermediate no-op duplicates (6ef6ff8a213f, eaeb574c5dc3) have been
+deleted and the chain compressed to a single canonical error_detail migration.
 
 """
 from typing import Sequence, Union
@@ -13,7 +17,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '3852f74b498a'
-down_revision: Union[str, Sequence[str], None] = 'eaeb574c5dc3'
+down_revision: Union[str, Sequence[str], None] = '3ea0a8e64e36'  # BUG-D1: was eaeb574c5dc3
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

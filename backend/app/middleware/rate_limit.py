@@ -1,8 +1,12 @@
 """
 Rate limiting middleware for InvoiceAI.
 
-BUG-08: Redis-backed sliding window rate limiter. Falls open (allows requests)
-        if Redis is unavailable — never blocks uploads due to Redis outage.
+BUG-B4: The Redis path uses a FIXED 60-second window (key = rate:{uid}:{epoch//60}).
+        This is NOT a sliding window — a user can exhaust the limit at 11:59:58 and
+        immediately reset at 12:00:00, allowing 2× the limit in ~2 seconds.
+        The in-memory fallback (deque-based) IS a true sliding window.
+        A proper Redis sliding window requires a ZSET; implementing that is a future task.
+        Falls open (allows requests) if Redis is unavailable — never blocks uploads due to Redis outage.
 """
 import time
 import logging
@@ -39,7 +43,14 @@ def _get_redis():
         except Exception as e:
             _redis_available = False
             _redis_client = None
-            logger.warning(f"[rate_limit] Redis unavailable, falling back to in-memory: {e}")
+            # BUG-C4: Log as ERROR so CloudWatch/Azure Monitor metric filters alert on this.
+            # In multi-worker mode each worker has its own in-memory store, so the effective
+            # rate limit multiplies by the worker count (e.g. 4 workers × 100/min = 400/min).
+            # This is a silent degradation that must be paged, not just warned.
+            logger.error(
+                f"[rate_limit] Redis UNAVAILABLE — falling back to per-worker in-memory rate limiting. "
+                f"Effective limit is NOW multiplied by worker count. Check REDIS_URL config. Error: {e}"
+            )
             return None
 
     return _redis_client
@@ -72,7 +83,8 @@ def rate_limited_user(current_user: User = Depends(get_current_user)) -> User:
     Combined auth + rate limit dependency for upload endpoints.
     Returns the authenticated User if the rate limit has not been exceeded.
 
-    BUG-08: Uses Redis sliding window when available. Falls back to in-memory.
+    BUG-B4: Redis path = fixed 60-second window (NOT sliding window — see module docstring).
+            In-memory fallback = true sliding window via deque.
     """
     from app.config import settings
     max_uploads = settings.UPLOAD_RATE_LIMIT_PER_MIN

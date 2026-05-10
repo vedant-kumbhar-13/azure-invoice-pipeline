@@ -1,0 +1,59 @@
+version: "3.9"
+
+# ── InvoiceAI — local / staging docker-compose ────────────────────────────────
+#
+# Usage:
+#   docker compose up --build
+#
+# Override secrets with a .env file or environment variables; never commit real
+# credentials to version control.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL database ──────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: invoiceai_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_IN_PRODUCTION}
+      POSTGRES_DB: invoiceai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoiceai_user -d invoiceai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"   # expose for local Alembic migrations; remove in production
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://invoiceai_user:${POSTGRES_PASSWORD:-CHANGE_ME_IN_PRODUCTION}@db:5432/invoiceai
+      # Azure credentials — supply via .env or secrets manager
+      AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: ${AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT}
+      AZURE_DOCUMENT_INTELLIGENCE_KEY: ${AZURE_DOCUMENT_INTELLIGENCE_KEY}
+      AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING}
+      AZURE_STORAGE_CONTAINER_NAME: ${AZURE_STORAGE_CONTAINER_NAME:-invoices-test}
+      JWT_SECRET: ${JWT_SECRET}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_PORT: "${APP_PORT:-8001}"  # BUG-D3: single source of truth
+      # BUG-A4: 4 workers — tune to 2 × vCPU count for your instance
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      FRONTEND_URL: ${FRONTEND_URL:-""}
+    ports:
+      - "${APP_PORT:-8001}:${APP_PORT:-8001}"  # BUG-D3: dynamic port
+
+volumes:
+  postgres_data:

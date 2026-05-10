@@ -148,3 +148,19 @@ def upload_file_to_blob(file_bytes: bytes, original_filename: str) -> str:
 
     # VUL-01: Return blob_name, NOT the full URL
     return blob_name
+
+
+def delete_blob(blob_name: str) -> None:
+    """
+    Deletes a blob from Azure Storage.
+
+    BUG-A3: Called before DB deletion to ensure blobs are not left orphaned
+    in storage after an invoice is deleted (cost leak + erasure compliance).
+
+    Raises:
+        Exception: Propagates storage errors so the caller can decide to log/swallow.
+    """
+    client = _get_blob_service_client()
+    container = client.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
+    container.delete_blob(blob_name)
+    logger.info(f"[blob] Deleted blob: {blob_name}")

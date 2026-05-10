@@ -1,8 +1,13 @@
 """
 Invoice field mapper — Azure Document Intelligence raw fields → canonical API contract.
 
-BUG-04: Attempts direct CGST/SGST/IGST extraction from Azure fields before fallback to _split_gst().
+Properly parses Azure's TaxDetails array for CGST/SGST/IGST extraction,
+with fallback to total tax splitting when individual breakdowns aren't available.
 """
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _get_field(fields: dict, key: str, value_type: str = "value_string") -> dict:
@@ -29,6 +34,87 @@ def _get_field(fields: dict, key: str, value_type: str = "value_string") -> dict
         return {"value": val, "confidence": round(float(confidence), 4)}
     except Exception:
         return {"value": None, "confidence": 0.0}
+
+
+def _extract_tax_details(raw_fields: dict) -> dict:
+    """
+    Parses Azure's TaxDetails array to extract CGST, SGST, and IGST.
+
+    Azure's prebuilt-invoice model returns tax breakdowns inside a TaxDetails
+    array. Each item can have:
+      - Amount (currency) — the tax amount
+      - Rate (string/number) — the tax rate percentage
+      - TaxType (string) — free-text description like "CGST", "SGST", "IGST"
+
+    We match tax types using regex patterns to handle variations like
+    "CGST @9%", "Central GST", "State GST", "Integrated GST", etc.
+    """
+    result = {
+        "cgst": {"value": None, "confidence": 0.0},
+        "sgst": {"value": None, "confidence": 0.0},
+        "igst": {"value": None, "confidence": 0.0},
+        "found": False,
+    }
+
+    tax_details_field = raw_fields.get("TaxDetails")
+    if not tax_details_field:
+        return result
+
+    # TaxDetails is an array field
+    tax_array = getattr(tax_details_field, "value_array", None) or []
+    if not tax_array:
+        return result
+
+    # Regex patterns to identify tax types from free-text descriptions
+    cgst_pattern = re.compile(r"\b(cgst|central\s*gst|c\.gst)\b", re.IGNORECASE)
+    sgst_pattern = re.compile(r"\b(sgst|state\s*gst|s\.gst|utgst|ut\s*gst)\b", re.IGNORECASE)
+    igst_pattern = re.compile(r"\b(igst|integrated\s*gst|i\.gst)\b", re.IGNORECASE)
+
+    for item in tax_array:
+        item_obj = getattr(item, "value_object", None) or {}
+        if not item_obj:
+            continue
+
+        # Extract the amount
+        amount_field = item_obj.get("Amount")
+        if not amount_field:
+            continue
+
+        confidence = getattr(amount_field, "confidence", 0.0) or 0.0
+        currency_obj = getattr(amount_field, "value_currency", None)
+        amount_val = getattr(currency_obj, "amount", None) if currency_obj else None
+
+        if amount_val is None:
+            continue
+
+        # Try to identify tax type from the TaxType or Description field
+        tax_type_str = ""
+        for type_key in ["TaxType", "Description", "Tax"]:
+            type_field = item_obj.get(type_key)
+            if type_field:
+                type_val = getattr(type_field, "value_string", None) or ""
+                if type_val:
+                    tax_type_str = type_val
+                    break
+
+        if not tax_type_str:
+            # Some Azure responses put it in content
+            tax_type_str = getattr(item, "content", "") or ""
+
+        # Match against patterns
+        if cgst_pattern.search(tax_type_str):
+            result["cgst"] = {"value": round(float(amount_val), 2), "confidence": round(float(confidence), 4)}
+            result["found"] = True
+        elif sgst_pattern.search(tax_type_str):
+            result["sgst"] = {"value": round(float(amount_val), 2), "confidence": round(float(confidence), 4)}
+            result["found"] = True
+        elif igst_pattern.search(tax_type_str):
+            result["igst"] = {"value": round(float(amount_val), 2), "confidence": round(float(confidence), 4)}
+            result["found"] = True
+        else:
+            logger.debug(f"[tax_details] Unrecognized tax type: '{tax_type_str}' with amount {amount_val}")
+
+    return result
 
 
 def _split_gst(total_tax_val, vendor_gstin: str, buyer_gstin: str):
@@ -59,8 +145,9 @@ def map_fields(raw_fields: dict) -> dict:
     """
     Maps Azure's prebuilt-invoice fields to our canonical API contract.
 
-    BUG-04: Tries to extract CGST/SGST/IGST directly from Azure raw fields first.
-            Falls back to _split_gst() only when all three are None (with 0.6 confidence multiplier).
+    Tax extraction priority:
+    1. Parse TaxDetails array (Azure's native tax breakdown)
+    2. Fallback: derive from TotalTax using GSTIN state codes (lower confidence)
     """
     if not raw_fields:
         return {}
@@ -74,34 +161,101 @@ def map_fields(raw_fields: dict) -> dict:
     total_tax_val = total_tax_data.get("value")
     tax_conf = total_tax_data.get("confidence", 0.0)
 
-    # ── BUG-04: Try direct CGST/SGST/IGST extraction from Azure fields ──
-    direct_cgst = _get_field(raw_fields, "CGST", "value_currency")
-    direct_sgst = _get_field(raw_fields, "SGST", "value_currency")
-    direct_igst = _get_field(raw_fields, "IGST", "value_currency")
+    # ── Step 1: Try parsing Azure's TaxDetails array ──
+    tax_details = _extract_tax_details(raw_fields)
 
-    # Also try alternate field names used by some Azure models
-    if direct_cgst["value"] is None:
-        direct_cgst = _get_field(raw_fields, "TaxDetails.CGST", "value_currency")
-    if direct_sgst["value"] is None:
-        direct_sgst = _get_field(raw_fields, "TaxDetails.SGST", "value_currency")
-    if direct_igst["value"] is None:
-        direct_igst = _get_field(raw_fields, "TaxDetails.IGST", "value_currency")
-
-    # Determine tax extraction method
-    if (direct_cgst["value"] is None and direct_sgst["value"] is None
-            and direct_igst["value"] is None):
-        # Fallback: derive from total tax (lower confidence)
-        cgst_val, sgst_val, igst_val = _split_gst(total_tax_val, vendor_gstin_val, buyer_gstin_val)
-        cgst = {"value": cgst_val, "confidence": round(tax_conf * 0.6, 4)}
-        sgst = {"value": sgst_val, "confidence": round(tax_conf * 0.6, 4)}
-        igst = {"value": igst_val, "confidence": round(tax_conf * 0.6, 4)}
-        tax_method = "derived"
-    else:
-        # Direct extraction — full confidence from Azure
-        cgst = direct_cgst
-        sgst = direct_sgst
-        igst = direct_igst
+    if tax_details["found"]:
+        # Direct extraction from TaxDetails array — high confidence
+        cgst = tax_details["cgst"]
+        sgst = tax_details["sgst"]
+        igst = tax_details["igst"]
         tax_method = "direct"
+        logger.info(
+            f"[mapper] Tax extracted from TaxDetails: "
+            f"CGST={cgst['value']} SGST={sgst['value']} IGST={igst['value']}"
+        )
+    elif total_tax_val is not None:
+        # ── Step 2: Derive from TotalTax ──
+        if float(total_tax_val) == 0:
+            # TotalTax is explicitly 0 — Bill of Supply / exempt.
+            # Set CGST=0, SGST=0 with HIGH confidence (Azure confirmed zero tax).
+            cgst = {"value": 0.0, "confidence": round(tax_conf * 0.9, 4)}
+            sgst = {"value": 0.0, "confidence": round(tax_conf * 0.9, 4)}
+            igst = {"value": None, "confidence": 0.0}
+            tax_method = "derived_zero"
+            logger.info("[mapper] TotalTax=0 — Bill of Supply / exempt supply detected")
+        else:
+            # Non-zero TotalTax — split based on GSTIN state codes
+            cgst_val, sgst_val, igst_val = _split_gst(total_tax_val, vendor_gstin_val, buyer_gstin_val)
+            cgst = {"value": cgst_val, "confidence": round(tax_conf * 0.6, 4)}
+            sgst = {"value": sgst_val, "confidence": round(tax_conf * 0.6, 4)}
+            igst = {"value": igst_val, "confidence": round(tax_conf * 0.6, 4)}
+            tax_method = "derived"
+            logger.info(
+                f"[mapper] Tax derived from TotalTax ({total_tax_val}): "
+                f"CGST={cgst_val} SGST={sgst_val} IGST={igst_val}"
+            )
+    else:
+        # ── Step 3: TotalTax not extracted at all ──
+        # Try multiple heuristics to determine if this is a zero-tax invoice.
+        subtotal_data = _get_field(raw_fields, "SubTotal", "value_currency")
+        total_data = _get_field(raw_fields, "InvoiceTotal", "value_currency")
+        subtotal_val = subtotal_data.get("value")
+        total_val = total_data.get("value")
+
+        # Heuristic A: SubTotal ≈ InvoiceTotal → no tax applied
+        if (subtotal_val is not None and total_val is not None
+                and abs(float(subtotal_val) - float(total_val)) < 1.0):
+            cgst = {"value": 0.0, "confidence": 0.7}
+            sgst = {"value": 0.0, "confidence": 0.7}
+            igst = {"value": None, "confidence": 0.0}
+            tax_method = "inferred_zero"
+            logger.info(
+                f"[mapper] Subtotal ({subtotal_val}) ≈ Total ({total_val}) — "
+                f"inferred zero tax (Bill of Supply)"
+            )
+
+        # Heuristic B: Sum of line item amounts ≈ InvoiceTotal → no tax
+        elif total_val is not None:
+            items_field = raw_fields.get("Items")
+            line_item_sum = 0.0
+            has_line_items = False
+            if items_field:
+                items_array = getattr(items_field, "value_array", []) or []
+                for item in items_array:
+                    item_dict = getattr(item, "value_object", {}) or {}
+                    amt_field = item_dict.get("Amount")
+                    if amt_field:
+                        currency = getattr(amt_field, "value_currency", None)
+                        amt = getattr(currency, "amount", None) if currency else None
+                        if amt is not None:
+                            line_item_sum += float(amt)
+                            has_line_items = True
+
+            if has_line_items and abs(line_item_sum - float(total_val)) < 2.0:
+                # Line items sum to approximately the total → no tax added
+                cgst = {"value": 0.0, "confidence": 0.65}
+                sgst = {"value": 0.0, "confidence": 0.65}
+                igst = {"value": None, "confidence": 0.0}
+                tax_method = "inferred_zero_lineitems"
+                logger.info(
+                    f"[mapper] Line items sum ({line_item_sum}) ≈ Total ({total_val}) — "
+                    f"inferred zero tax from line items"
+                )
+            else:
+                # Genuinely missing tax data — no way to determine
+                cgst = {"value": None, "confidence": 0.0}
+                sgst = {"value": None, "confidence": 0.0}
+                igst = {"value": None, "confidence": 0.0}
+                tax_method = "missing"
+                logger.info("[mapper] No tax data available — all taxes set to null")
+        else:
+            # No total, no subtotal, no TotalTax — nothing to work with
+            cgst = {"value": None, "confidence": 0.0}
+            sgst = {"value": None, "confidence": 0.0}
+            igst = {"value": None, "confidence": 0.0}
+            tax_method = "missing"
+            logger.info("[mapper] No tax or total data available — all taxes set to null")
 
     data = {
         "vendor_name": _get_field(raw_fields, "VendorName", "value_string"),
@@ -116,7 +270,7 @@ def map_fields(raw_fields: dict) -> dict:
         "cgst": cgst,
         "sgst": sgst,
         "igst": igst,
-        "tax_method": tax_method,  # BUG-04: "direct" if Azure extracted, "derived" if split
+        "tax_method": tax_method,
         "line_items": [],
     }
 

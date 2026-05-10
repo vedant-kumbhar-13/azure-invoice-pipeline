@@ -56,8 +56,9 @@ export interface Invoice {
   id: string;
   original_filename: string;
   status: string;
-  file_url: string;                        // VUL-01: blob_name (internal reference)
-  file_url_sas?: string;                   // VUL-01: time-limited SAS URL for display
+  // BUG-C3: file_url (raw blob name) removed — backend no longer exposes it.
+  // Use file_url_sas (time-limited SAS URL) for all file access.
+  file_url_sas?: string;
   data_json?: InvoiceData;
   data?: InvoiceData;                      // backend alias
   confidence_score: number;

@@ -1,8 +1,12 @@
-"""add_error_detail_to_invoices
+"""add_error_detail_column_to_invoices
 
 Revision ID: 3ea0a8e64e36
 Revises: 2cbea98c402b
 Create Date: 2026-04-02 15:48:36.038247
+
+BUG-D1: This is the canonical single migration that adds error_detail.
+Revisions 6ef6ff8a213f and eaeb574c5dc3 were no-op duplicates with the same
+description; they have been deleted and the chain rewired through this file.
 
 """
 from typing import Sequence, Union

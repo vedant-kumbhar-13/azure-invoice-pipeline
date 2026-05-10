@@ -22,6 +22,7 @@ def analyze_invoice(file_url: str) -> dict:
     poller = client.begin_analyze_document(
         "prebuilt-invoice",
         AnalyzeDocumentRequest(url_source=file_url),
+        locale="en-IN"
     )
 
     result = poller.result()

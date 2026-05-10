@@ -5,9 +5,8 @@ VUL-02: Wraps _is_safe_webhook_url() in try/except with WARNING logging.
 """
 import logging
 from typing import List, Optional
-import hashlib
 import asyncio
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
@@ -24,7 +23,9 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 class WebhookCreate(BaseModel):
     url: HttpUrl
     events: List[str]
-    secret: str
+    # BUG-C1: Enforce minimum secret length so HMAC is actually meaningful.
+    # An empty or single-character secret is indistinguishable from no secret at all.
+    secret: str = Field(min_length=16, description="Webhook signing secret (min 16 characters)")
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def register_webhook(
@@ -48,14 +49,14 @@ def register_webhook(
             detail="Webhook URL is blocked. Private IPs and internal addresses are not allowed."
         )
 
-    # BUG-05: Hash the secret before storing — user sees raw secret only once
+    # BUG-A1: Store raw_secret as the HMAC key — consumers verify with raw_secret.
+    # The SHA-256 hash is only used for safe display (never stored, never used for signing).
     raw_secret = payload.secret
-    secret_hash = hashlib.sha256(raw_secret.encode('utf-8')).hexdigest()
 
     new_hook = Webhook(
         user_id=current_user.id,
         url=url_str,
-        secret=secret_hash,
+        secret=raw_secret,          # BUG-A1: raw secret is the HMAC key
         events=payload.events,
         is_active=True
     )

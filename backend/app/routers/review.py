@@ -151,6 +151,25 @@ def submit_review(
         invoice.confidence = conf_result["overall_score"]
         new_status = "VERIFIED"
         new_ingestion = "HUMAN"
+
+        # Re-run GST rules on corrected data for consistency
+        from app.services.gst_rules import run_gst_rules
+        invoice.gst_rules_json = run_gst_rules(after_data)
+
+        # Save corrections to vendor cache for future invoices
+        from app.services.corrections_cache import save_correction
+        try:
+            save_correction(
+                db=db,
+                invoice_id=invoice.id,
+                user_id=current_user.id,
+                before_data=before_data,
+                after_data=after_data,
+            )
+        except Exception as e:
+            # Don't fail the review if cache save fails
+            logger.warning(f"[review:{invoice.id}] Failed to cache correction: {e}")
+
         # BUG-22: Store only the diff — not full before/after blobs
         log_before = _compute_diff(before_data or {}, after_data or {})
         log_after = None  # diff already captures both

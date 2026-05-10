@@ -20,7 +20,17 @@ class Settings(BaseSettings):
     # Optional
     ENVIRONMENT: str = "dev"
     LOG_LEVEL: str = "INFO"
+    # BUG-D3: APP_PORT is now consumed by:
+    #   - start.sh (local/dev startup script)
+    #   - Dockerfile ENV APP_PORT + CMD --port ${APP_PORT}
+    #   - docker-compose.yml ports and environment sections
+    # Previously this setting was declared but never read by anything.
     APP_PORT: int = 8001
+
+    # BUG-B1: Production frontend URL — must be set in production .env.
+    # In dev this is unused; in production it becomes the only allowed CORS origin.
+    # Example: https://invoiceai.example.com
+    FRONTEND_URL: str = ""
 
     # BUG-05: GST e-Invoice IRN must be generated within 30 days of invoice date.
     # But for reconciliation/audit uploads, India IT Act allows 3-year retention.

@@ -8,7 +8,9 @@ BUG-21: pyzbar startup health check.
 """
 import asyncio
 import logging
+import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
@@ -21,12 +23,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.routers import auth, invoices, review, webhooks
-import os
 
 logger = logging.getLogger("invoiceai")
 
 # ── BUG-21: Track QR detection availability ────────────────────────────────
 _qr_detection_ok = True
+
+# ── BUG-B5: Bounded thread pool for invoice pipeline background tasks ───────
+# Starlette's default executor is shared with FastAPI internals and is
+# effectively unbounded. A dedicated pool with an explicit cap prevents
+# thread exhaustion under concurrent uploads.
+_pipeline_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="invoice-pipeline")
 
 
 # ── BUG-16: Lifespan — startup/shutdown tasks ─────────────────────────────
@@ -35,6 +42,32 @@ _qr_detection_ok = True
 async def lifespan(app: FastAPI):
     """Application lifespan: startup checks + background cleanup tasks."""
     global _qr_detection_ok
+
+    # Ensure all models are imported so SQLAlchemy creates tables
+    from app.models.invoice import Invoice  # noqa: F401
+    from app.models.user import User  # noqa: F401
+    from app.models.review_log import ReviewLog  # noqa: F401
+    from app.models.vendor_correction import VendorCorrection  # noqa: F401
+    from app.database import engine, Base
+    Base.metadata.create_all(bind=engine)
+
+    # BUG-B6: Auto-run Alembic migrations on every startup.
+    # This eliminates the "forgotten migration" class of deploy failures.
+    # create_all() above is retained as a safety net for tests/SQLite;
+    # Alembic is authoritative for PostgreSQL production schemas.
+    try:
+        import subprocess, sys
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            logger.info("[startup] Alembic migrations applied successfully")
+        else:
+            logger.error(f"[startup] Alembic migration FAILED:\n{result.stderr}")
+    except Exception as alembic_err:
+        logger.error(f"[startup] Could not run Alembic migrations: {alembic_err}")
+
 
     # WIN-01: Check zxing-cpp (Windows-native, replaces pyzbar) and cv2 availability at startup.
     try:
@@ -149,8 +182,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # ───────────────────────────────────────────────
 # BUG-15: Narrowed CORS Configuration
+# BUG-B1: Production CORS reads from settings.FRONTEND_URL — never a placeholder
 # ───────────────────────────────────────────────
-if os.getenv("ENVIRONMENT", "dev") == "dev":
+from app.config import settings
+
+if settings.ENVIRONMENT == "dev":
     origins = [
         "http://127.0.0.1:5500",
         "http://127.0.0.1:5501",
@@ -162,10 +198,15 @@ if os.getenv("ENVIRONMENT", "dev") == "dev":
         "http://127.0.0.1:5173",
     ]
 else:
-    origins = [
-        "https://yourdomain.com",
-        "http://localhost:5173",
-    ]
+    # BUG-B1: Production ONLY — no localhost, no placeholder.
+    # If FRONTEND_URL is not set, fail loudly so misconfiguration is caught
+    # at startup rather than silently rejecting all real frontend requests.
+    if not settings.FRONTEND_URL:
+        raise RuntimeError(
+            "FRONTEND_URL must be set in .env when ENVIRONMENT != 'dev'. "
+            "Example: FRONTEND_URL=https://invoiceai.yourdomain.com"
+        )
+    origins = [settings.FRONTEND_URL]
 
 app.add_middleware(
     CORSMiddleware,
@@ -248,7 +289,10 @@ def health():
         db.execute(text("SELECT 1"))
         db.close()
     except Exception as e:
-        db_status = f"error: {str(e)[:200]}"
+        # BUG-C2: Never expose raw DB exception details in a public endpoint.
+        # Connection strings, table names, and internal IPs can appear in SQLAlchemy errors.
+        logger.error(f"[health] Database connectivity check failed: {e}", exc_info=True)
+        db_status = "error: database unavailable"
 
     azure_status = "configured"
     try:

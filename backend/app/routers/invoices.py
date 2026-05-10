@@ -11,8 +11,9 @@ import hashlib
 import logging
 import io
 import csv
+import asyncio
 
-from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks, HTTPException, status, Header
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sqlfunc, or_, cast, String
@@ -21,7 +22,7 @@ from app.models.user import User
 from app.models.invoice import Invoice
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import rate_limited_user
-from app.services.blob_storage import upload_file_to_blob, get_blob_sas_url
+from app.services.blob_storage import upload_file_to_blob, get_blob_sas_url, delete_blob
 from app.utils.datetime_utils import utc_iso
 from app.services.azure_ai import analyze_invoice
 from app.services.invoice_mapper import map_fields, map_gst_qr_to_canonical
@@ -50,7 +51,11 @@ def _validate_file_magic(file_bytes: bytes, ext: str) -> bool:
     return any(file_bytes[:len(sig)] == sig for sig in sigs)
 
 
-# ── BUG-07: Unified pipeline wrapper ───────────────────────────────────────
+# ── BUG-07 + BUG-B5: Bounded executor ──────────────────────────────────────
+# Import the dedicated thread pool from main so all pipeline tasks are bounded
+# to 10 concurrent threads regardless of how many uploads arrive simultaneously.
+from app.main import _pipeline_executor
+
 
 def _run_pipeline_task(invoice_id: str, blob_name: str, filename: str):
     """Background task wrapper: generates SAS URL and runs the unified pipeline."""
@@ -61,7 +66,6 @@ def _run_pipeline_task(invoice_id: str, blob_name: str, filename: str):
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED)
 async def upload_invoice(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     x_idempotency_key: str = Header(None),
     db: Session = Depends(get_db),
@@ -157,12 +161,14 @@ async def upload_invoice(
     # VUL-03: Free file_bytes immediately — no longer passed to background task
     del file_bytes
 
-    # BUG-07: Use unified pipeline (includes QR detection for all paths)
-    background_tasks.add_task(
+    # BUG-07 + BUG-B5: Submit to the bounded pipeline thread pool.
+    # background_tasks.add_task uses Starlette's shared, unbounded executor.
+    # _pipeline_executor caps concurrency at 10 named threads.
+    _pipeline_executor.submit(
         _run_pipeline_task,
-        invoice_id=new_invoice.id,
-        blob_name=blob_name,
-        filename=file.filename,
+        new_invoice.id,
+        blob_name,
+        file.filename,
     )
 
     return {
@@ -320,8 +326,9 @@ def get_invoice(
         "id": invoice.id,
         "status": invoice.status,
         "original_filename": invoice.original_filename,
-        "file_url": invoice.file_url,        # VUL-01: blob_name (internal reference)
-        "file_url_sas": file_url_sas,         # VUL-01: time-limited SAS URL for frontend
+        # BUG-C3: blob_name (file_url) is an internal implementation detail — never expose it.
+        # Consumers only need the time-limited SAS URL.
+        "file_url_sas": file_url_sas,
         "created_at": utc_iso(invoice.created_at),
         "confidence_score": invoice.confidence,
         "data": invoice.data_json,
@@ -348,6 +355,17 @@ def delete_invoice(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found.")
 
+    # BUG-A3: Delete the Azure blob before removing the DB record.
+    # Try/except ensures a transient storage error is logged but does NOT block erasure.
+    if invoice.file_url:
+        try:
+            delete_blob(invoice.file_url)
+        except Exception as blob_err:
+            logger.warning(
+                f"[invoice] Blob deletion failed for {invoice.file_url} "
+                f"(invoice {invoice_id}): {blob_err} — continuing with DB delete."
+            )
+
     db.delete(invoice)
     db.commit()
 
@@ -355,7 +373,6 @@ def delete_invoice(
 @router.post("/{invoice_id}/reprocess", status_code=status.HTTP_202_ACCEPTED)
 def reprocess_invoice(
     invoice_id: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -378,12 +395,12 @@ def reprocess_invoice(
     invoice.error_detail = None
     db.commit()
 
-    # BUG-07: Use unified pipeline — same as initial upload (includes QR detection)
-    background_tasks.add_task(
+    # BUG-07 + BUG-B5: Submit to the bounded pipeline thread pool.
+    _pipeline_executor.submit(
         _run_pipeline_task,
-        invoice_id=invoice.id,
-        blob_name=invoice.file_url,       # VUL-01: file_url is blob_name
-        filename=invoice.original_filename or "unknown.pdf",
+        invoice.id,
+        invoice.file_url,       # VUL-01: file_url is blob_name
+        invoice.original_filename or "unknown.pdf",
     )
 
     return {"id": invoice.id, "status": "processing"}

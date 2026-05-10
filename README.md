@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/InvoiceAI-Enterprise%20GST%20Platform-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white" alt="InvoiceAI"/>
+<img src="https://img.shields.io/badge/Azure_Invoice_Pipeline-Enterprise%20GST%20Platform-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white" alt="Azure Invoice Pipeline"/>
 
-# ⚡ InvoiceAI — Enterprise GST Invoice Processing Platform
+# ⚡ Azure Invoice Pipeline — Enterprise GST Processing
 
 **Automate GST invoice ingestion · QR decoding · OCR extraction · Compliance validation · Human review**
 
@@ -16,9 +16,9 @@
 
 ---
 
-## 📌 What is InvoiceAI?
+## 📌 What is Azure Invoice Pipeline?
 
-**InvoiceAI** is a production-ready, full-stack platform built for Indian GST compliance. It eliminates manual invoice data entry by combining:
+**Azure Invoice Pipeline** is a production-ready, full-stack platform built for Indian GST compliance. It eliminates manual invoice data entry by combining:
 
 - 🔍 **3-Layer QR Decoder** — reads GST e-Invoice JWT QR codes instantly (Windows-native, no Linux DLLs)
 - 🤖 **Azure Document Intelligence** — state-of-the-art OCR fallback for non-QR invoices
@@ -248,8 +248,8 @@ User uploads PDF / JPEG / PNG
 
 ### 1. Clone
 ```bash
-git clone https://github.com/Patil-Sumit98/Redivivus-invoiceai.git
-cd Redivivus-invoiceai
+git clone https://github.com/vedant-kumbhar-13/azure-invoice-pipeline.git
+cd azure-invoice-pipeline
 ```
 
 ### 2. Backend Setup
@@ -378,18 +378,18 @@ Redivivus-invoiceai/
 
 ---
 
-## 🐛 Recent Bug Fixes
+## 🛡️ Production Hardening & Security Features
 
-| Fix | Area | Description |
-|-----|------|-------------|
-| **WIN-01** | QR Stack | `pyzbar` (Linux DLL) → `zxing-cpp` (Windows native wheel) |
-| **DL-FIX** | Blob Storage | Added `Content-Disposition: inline` to SAS URLs — stops auto-download |
-| **HOOK-FIX** | React | Moved `useRef` above early returns in `InvoiceDetailPage` — blank page fixed |
-| **MULTI-FIX** | Upload | `uploadSubmitted` ref guard prevents 11× duplicate uploads on re-render |
-| **PREVIEW-FIX** | Review Modal | Uses `file_url_sas` not raw blob name — PDF now displays correctly |
-| **LOOP-FIX** | SAS URLs | Locked SAS URL in `useRef` — polling no longer triggers repeated downloads |
-| **TZ-FIX** | Dates | `timeZone:'Asia/Kolkata'` set in all formatters — IST dates now correct |
-| **REGEX-FIX** | Dates | Fixed `toUTCDate()` regex crashing on `+00:00` offset strings |
+The platform has been extensively hardened for production deployments:
+
+| Area | Feature |
+|------|---------|
+| **Core Architecture** | Fully Dockerised with multi-worker Uvicorn and PostgreSQL. Bounded thread-pool executors prevent event-loop blocking during heavy OCR loads. |
+| **Data Privacy** | Health endpoints redact infrastructure errors. Raw internal blob names are never exposed; the frontend exclusively uses time-limited SAS URLs. |
+| **Authentication** | Secure, httpOnly cookies for refresh tokens. JWT access tokens are kept in memory (Zustand) and never persisted to localStorage to prevent XSS exfiltration. |
+| **API Security** | Strict CORS configurations with environment-bound allowed origins. Webhook signatures use raw secret HMAC validation with Pydantic minimum length constraints. |
+| **Cost Optimisation** | Smart QR detector pre-checks extensions and caps PDF downloads to 1MB (first page only) to prevent massive egress costs on non-QR invoices. |
+| **Resilience** | Redis-backed rate limiting with graceful fallback to in-memory deque limits. Automated schema migrations on startup. Database constraints prevent registration race conditions. |
 
 ---
 
