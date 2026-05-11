@@ -26,6 +26,7 @@ class Invoice(Base):
     ingestion_method = Column(String, nullable=True) # QR, OCR, HUMAN
     gst_rules_json = Column(JSON, nullable=True)
     idempotency_key = Column(String(64), nullable=True, unique=True, index=True)
+    batch_id = Column(String(36), nullable=True, index=True)
     processing_time_ms = Column(Integer, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -111,3 +111,28 @@ export interface ReviewItem {
   created_at: string;
   gst_flags: string[];
 }
+
+export interface BatchInvoiceItem {
+  id: string;
+  original_filename: string;
+  status: string;
+  confidence_score: number | null;
+  ingestion_method: string | null;
+}
+
+export interface BatchStatusResponse {
+  batch_id: string;
+  overall_status: "PROCESSING" | "COMPLETED" | "PARTIAL";
+  total: number;
+  completed: number;
+  failed: number;
+  invoices: BatchInvoiceItem[];
+}
+
+export interface BulkUploadResponse {
+  batch_id: string;
+  total_files: number;
+  accepted: number;
+  rejected: { filename: string; reason: string }[];
+  invoices: { invoice_id: string; filename: string; status: string }[];
+}

@@ -12,6 +12,8 @@ import logging
 import io
 import csv
 import asyncio
+import uuid
+from typing import List
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Header
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -52,13 +54,66 @@ def _validate_file_magic(file_bytes: bytes, ext: str) -> bool:
 
 
 # ── BUG-07 + BUG-B5: Bounded executor ──────────────────────────────────────
-# Import the dedicated thread pool from main so all pipeline tasks are bounded
-# to 10 concurrent threads regardless of how many uploads arrive simultaneously.
-from app.main import _pipeline_executor
+# The thread pool lives in app.main._pipeline_executor.  We lazy-import it
+# inside the functions that submit work to avoid a circular import
+# (app.main → app.routers.invoices → app.main).
+
+logger = logging.getLogger("invoiceai.invoices")
+
+
+def _get_executor():
+    """Lazy accessor that avoids the circular import at module level."""
+    from app.main import _pipeline_executor
+    return _pipeline_executor
+
+
+def _run_full_task(invoice_id: str, file_bytes: bytes, filename: str):
+    """Background task: uploads blob, saves URL, then runs the full pipeline.
+
+    Runs inside _pipeline_executor so the HTTP response is not blocked.
+    Uses its own DB session (the request session is long gone by now).
+    """
+    from app.services.processing_pipeline import run_invoice_pipeline
+    db = SessionLocal()
+    try:
+        # a) Upload to blob
+        blob_name = upload_file_to_blob(file_bytes, filename)
+
+        # b) Persist blob_name in the invoice record
+        invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+        if not invoice:
+            logger.error(f"[full_task] Invoice {invoice_id} not found in DB — aborting")
+            return
+        invoice.file_url = blob_name
+        db.commit()
+
+        # c) Generate a time-limited SAS URL for Azure Document Intelligence
+        blob_url = get_blob_sas_url(blob_name)
+
+        # d) Run the unified processing pipeline
+        run_invoice_pipeline(invoice_id, blob_url, filename)
+    except Exception as exc:
+        # e) On ANY failure — mark invoice as failed with the error detail
+        logger.exception(f"[full_task] Invoice {invoice_id} failed: {exc}")
+        try:
+            invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
+            if invoice:
+                invoice.status = "failed"
+                invoice.error_detail = str(exc)[:500]
+                db.commit()
+        except Exception as db_err:
+            logger.error(f"[full_task] Could not update failure status for {invoice_id}: {db_err}")
+    finally:
+        db.close()
+        # Free potentially large buffer
+        del file_bytes
 
 
 def _run_pipeline_task(invoice_id: str, blob_name: str, filename: str):
-    """Background task wrapper: generates SAS URL and runs the unified pipeline."""
+    """Background task wrapper for *reprocess*: blob already uploaded.
+
+    Generates a fresh SAS URL and runs the unified pipeline.
+    """
     from app.services.processing_pipeline import run_invoice_pipeline
     blob_url = get_blob_sas_url(blob_name)
     run_invoice_pipeline(invoice_id, blob_url, filename)
@@ -141,35 +196,18 @@ async def upload_invoice(
             )
         raise HTTPException(status_code=500, detail="Unexpected conflict during upload.")
 
-    # VUL-01: Upload to blob — returns blob_name (not full URL)
-    try:
-        blob_name = upload_file_to_blob(file_bytes, file.filename)
-    except RuntimeError as e:
-        # Azure Storage account disabled or unreachable
-        new_invoice.status = "failed"
-        new_invoice.error_detail = str(e)[:500]
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
-        )
-
-    # VUL-01: Store blob_name in DB (column kept as file_url to avoid migration)
-    new_invoice.file_url = blob_name
-    db.commit()
-
-    # VUL-03: Free file_bytes immediately — no longer passed to background task
-    del file_bytes
-
-    # BUG-07 + BUG-B5: Submit to the bounded pipeline thread pool.
-    # background_tasks.add_task uses Starlette's shared, unbounded executor.
-    # _pipeline_executor caps concurrency at 10 named threads.
-    _pipeline_executor.submit(
-        _run_pipeline_task,
+    # Submit blob upload + pipeline to the bounded thread pool.
+    # Both the blocking upload_file_to_blob() (5–15 s) and the pipeline
+    # now run in the background so the HTTP response returns immediately.
+    _get_executor().submit(
+        _run_full_task,
         new_invoice.id,
-        blob_name,
+        file_bytes,
         file.filename,
     )
+
+    # Free the request-scoped reference; the background thread has its own copy.
+    del file_bytes
 
     return {
         "id": new_invoice.id,
@@ -396,7 +434,7 @@ def reprocess_invoice(
     db.commit()
 
     # BUG-07 + BUG-B5: Submit to the bounded pipeline thread pool.
-    _pipeline_executor.submit(
+    _get_executor().submit(
         _run_pipeline_task,
         invoice.id,
         invoice.file_url,       # VUL-01: file_url is blob_name
@@ -404,6 +442,157 @@ def reprocess_invoice(
     )
 
     return {"id": invoice.id, "status": "processing"}
+
+
+# ── Bulk Upload Endpoints ──────────────────────────────────────────────────
+
+MAX_BATCH_FILES = 20
+
+# Terminal statuses for determining if batch processing is complete
+_TERMINAL_STATUSES = {
+    "AUTO_APPROVED", "NEEDS_REVIEW", "HUMAN_REQUIRED",
+    "failed", "VERIFIED", "REJECTED", "completed",
+}
+
+
+@router.post("/upload/bulk", status_code=status.HTTP_202_ACCEPTED)
+async def upload_invoices_bulk(
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(rate_limited_user),
+):
+    """Bulk upload up to 20 invoice files in one request.
+
+    Each file is validated independently.  Valid files get an Invoice DB
+    record and are submitted to the background thread pool.  Invalid
+    files are collected in the 'rejected' list.
+    """
+    import os
+
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Max {MAX_BATCH_FILES} files per batch.",
+        )
+
+    batch_id = str(uuid.uuid4())
+    accepted_invoices: list[dict] = []
+    rejected_files: list[dict] = []
+
+    for file in files:
+        filename = file.filename or "unknown"
+        ext = os.path.splitext(filename)[1].lower()
+
+        # Extension check
+        if ext not in ALLOWED_EXTENSIONS:
+            rejected_files.append({
+                "filename": filename,
+                "reason": f"File type '{ext}' not allowed. Use PDF, JPG, or PNG.",
+            })
+            continue
+
+        file_bytes = await file.read()
+
+        # Size check
+        if len(file_bytes) > MAX_FILE_SIZE:
+            rejected_files.append({"filename": filename, "reason": "File exceeds 20MB limit."})
+            del file_bytes
+            continue
+
+        # Magic bytes check
+        if not _validate_file_magic(file_bytes, ext):
+            rejected_files.append({
+                "filename": filename,
+                "reason": "File content does not match the claimed extension.",
+            })
+            del file_bytes
+            continue
+
+        # Create Invoice DB record
+        new_invoice = Invoice(
+            user_id=current_user.id,
+            status="processing",
+            original_filename=filename,
+            batch_id=batch_id,
+            source_type="UNKNOWN",
+            ingestion_method="PENDING",
+        )
+        db.add(new_invoice)
+        db.commit()
+        db.refresh(new_invoice)
+
+        # Submit to background thread pool
+        _get_executor().submit(
+            _run_full_task,
+            new_invoice.id,
+            file_bytes,
+            filename,
+        )
+        del file_bytes
+
+        accepted_invoices.append({
+            "invoice_id": new_invoice.id,
+            "filename": filename,
+            "status": new_invoice.status,
+        })
+
+    return {
+        "batch_id": batch_id,
+        "total_files": len(files),
+        "accepted": len(accepted_invoices),
+        "rejected": rejected_files,
+        "invoices": accepted_invoices,
+    }
+
+
+@router.get("/batch/{batch_id}")
+def get_batch_status(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return live processing status for every invoice in a batch."""
+    invoices = (
+        db.query(Invoice)
+        .filter(
+            Invoice.batch_id == batch_id,
+            Invoice.user_id == current_user.id,
+        )
+        .order_by(Invoice.created_at.asc())
+        .all()
+    )
+
+    if not invoices:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    statuses = [inv.status for inv in invoices]
+    completed_count = sum(1 for s in statuses if s in _TERMINAL_STATUSES)
+    failed_count = sum(1 for s in statuses if s in ("failed", "REJECTED"))
+
+    if all(s in _TERMINAL_STATUSES for s in statuses):
+        overall = "COMPLETED"
+    elif any(s == "processing" for s in statuses):
+        overall = "PROCESSING"
+    else:
+        overall = "PARTIAL"
+
+    return {
+        "batch_id": batch_id,
+        "overall_status": overall,
+        "total": len(invoices),
+        "completed": completed_count,
+        "failed": failed_count,
+        "invoices": [
+            {
+                "id": inv.id,
+                "original_filename": inv.original_filename,
+                "status": inv.status,
+                "confidence_score": inv.confidence,
+                "ingestion_method": inv.ingestion_method,
+            }
+            for inv in invoices
+        ],
+    }
 
 
 # ── Export Endpoints ────────────────────────────

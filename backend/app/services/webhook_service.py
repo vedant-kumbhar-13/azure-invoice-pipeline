@@ -112,7 +112,7 @@ def compute_hmac_signature(payload_bytes: bytes, secret: str) -> str:
     return hmac.new(secret.encode('utf-8'), payload_bytes, hashlib.sha256).hexdigest()
 
 
-def deliver_webhook_sync(delivery_id: str):
+def deliver_webhook_sync(delivery_id: str, extra_data: dict | None = None):
     """
     Synchronous delivery function (called from thread pool).
     """
@@ -169,6 +169,8 @@ def deliver_webhook_sync(delivery_id: str):
                     "data": invoice.data_json,
                     "confidence": invoice.confidence
                 }
+                if extra_data:
+                    payload_dict.update(extra_data)
             else:
                 payload_dict = {"event": "ping", "message": "Test webhook payload"}
 
@@ -224,10 +226,13 @@ def deliver_webhook(delivery_id: str):
     deliver_webhook_sync(delivery_id)
 
 
-def trigger_webhooks_for_invoice(invoice_id: str, user_id: str, event: str):
+def trigger_webhooks_for_invoice(invoice_id: str, user_id: str, event: str, extra_data: dict | None = None):
     """
     Called after invoice processing completes.
     Uses bounded thread pool (BUG-07 fix) instead of unbounded Thread().start().
+
+    Args:
+        extra_data: Optional dict merged into the webhook payload (e.g. batch_id).
     """
     db = SessionLocal()
     try:
@@ -249,9 +254,10 @@ def trigger_webhooks_for_invoice(invoice_id: str, user_id: str, event: str):
                 db.refresh(delivery)
 
                 # BUG-07: Use bounded thread pool instead of Thread().start()
-                _webhook_executor.submit(deliver_webhook_sync, delivery.id)
+                _webhook_executor.submit(deliver_webhook_sync, delivery.id, extra_data)
 
     except Exception as e:
         logger.error(f"[webhook] Error triggering webhooks for invoice {invoice_id}: {e}")
     finally:
         db.close()
+

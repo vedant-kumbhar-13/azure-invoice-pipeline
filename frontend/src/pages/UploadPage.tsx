@@ -1,18 +1,30 @@
+import { useState } from 'react';
 import { useUploadInvoice } from '../hooks/useUploadInvoice';
+import { useBulkUploadInvoice } from '../hooks/useBulkUploadInvoice';
 import { FileDropzone } from '../components/FileDropzone';
-import { UploadCloud, ChevronRight, FileSearch, Fingerprint, Network } from 'lucide-react';
+import { UploadCloud, ChevronRight, FileSearch, Fingerprint, Network, Files } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient } from '../api/client';
 import type { InvoiceListItem } from '../types';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatCurrency, formatTimeAgo } from '../utils/formatters';
 
+type UploadMode = 'single' | 'bulk';
+
 export const UploadPage = () => {
-  const { mutate: uploadInvoice, isPending } = useUploadInvoice();
+  const [mode, setMode] = useState<UploadMode>('single');
+  const { mutate: uploadInvoice, isPending: isSinglePending } = useUploadInvoice();
+  const { mutate: uploadBulk, isPending: isBulkPending } = useBulkUploadInvoice();
 
   const handleUpload = (file: File) => {
     uploadInvoice(file);
   };
+
+  const handleBulkUpload = (files: File[]) => {
+    uploadBulk(files);
+  };
+
+  const isPending = mode === 'single' ? isSinglePending : isBulkPending;
 
   const { data: recentInvoices } = useQuery<{items: InvoiceListItem[]}>({
     queryKey: ['invoices', { limit: 5 }],
@@ -30,8 +42,48 @@ export const UploadPage = () => {
          <p className="text-ink-500 font-medium">Securely upload e-Invoices or PDF documents for intelligent extraction.</p>
       </div>
 
+      {/* Mode Toggle */}
+      <div className="flex justify-center">
+        <div className="inline-flex bg-ink-100 rounded-xl p-1 gap-0.5">
+          <button
+            onClick={() => setMode('single')}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+              mode === 'single'
+                ? 'bg-white text-ink-900 shadow-sm'
+                : 'text-ink-500 hover:text-ink-700'
+            }`}
+          >
+            <UploadCloud className="h-4 w-4" />
+            Single Invoice
+          </button>
+          <button
+            onClick={() => setMode('bulk')}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-200 ${
+              mode === 'bulk'
+                ? 'bg-white text-ink-900 shadow-sm'
+                : 'text-ink-500 hover:text-ink-700'
+            }`}
+          >
+            <Files className="h-4 w-4" />
+            Bulk Upload
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+              mode === 'bulk'
+                ? 'bg-blue-100 text-blue-700'
+                : 'bg-ink-200 text-ink-500'
+            }`}>
+              up to 20
+            </span>
+          </button>
+        </div>
+      </div>
+
       <div>
-         <FileDropzone onUpload={handleUpload} isUploading={isPending} />
+         <FileDropzone
+           onUpload={handleUpload}
+           onBulkUpload={handleBulkUpload}
+           isUploading={isPending}
+           mode={mode}
+         />
       </div>
 
       {/* How it works - Horizontal Flow */}

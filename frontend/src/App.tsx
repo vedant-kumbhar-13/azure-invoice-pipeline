@@ -13,6 +13,7 @@ import { InvoiceDetailPage } from './pages/InvoiceDetailPage';
 import { ReviewQueuePage } from './pages/ReviewQueuePage';
 import { InvoicesPage } from './pages/InvoicesPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { BatchStatusPage } from './pages/BatchStatusPage';
 
 // Layout
 import { DashboardLayout } from './layouts/DashboardLayout';
@@ -35,6 +36,7 @@ export const App = () => {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/upload" element={<UploadPage />} />
             <Route path="/invoices" element={<InvoicesPage />} />
+            <Route path="/invoices/batch/:batchId" element={<BatchStatusPage />} />
             <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
             <Route path="/review-queue" element={<ReviewQueuePage />} />
             <Route path="/settings" element={<SettingsPage />} />

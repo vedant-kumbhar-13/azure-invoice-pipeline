@@ -146,6 +146,21 @@ def run_invoice_pipeline(invoice_id: str, blob_url: str, filename: str):
         from app.services.webhook_service import trigger_webhooks_for_invoice
         trigger_webhooks_for_invoice(invoice.id, invoice.user_id, "invoice.completed")
 
+        # STEP 7: Check if this was the last invoice in a batch
+        if invoice.batch_id:
+            remaining = db.query(Invoice).filter(
+                Invoice.batch_id == invoice.batch_id,
+                Invoice.status == "processing",
+            ).count()
+            if remaining == 0:
+                trigger_webhooks_for_invoice(
+                    invoice.id,
+                    invoice.user_id,
+                    "batch.completed",
+                    extra_data={"batch_id": invoice.batch_id},
+                )
+                logger.info(f"[pipeline] Batch {invoice.batch_id} fully completed")
+
     except Exception as e:
         logger.error(f"[pipeline:{invoice_id}] Failed: {e}", exc_info=True)
         db.rollback()

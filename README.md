@@ -59,21 +59,23 @@
 ---
 
 ### 3. 📤 Upload Invoice
-> Drag-and-drop invoice uploader with file preview and one-click processing trigger.
+> Drag-and-drop invoice uploader with file preview, **single or bulk mode**, and one-click processing trigger.
 
 ![Upload Invoice](docs/screenshots/upload_invoice.png)
 
 **Features:**
-- Drag-and-drop or click-to-browse file selection (PDF, JPEG, PNG — max 20 MB)
-- Live file preview (PDF rendered inline, images displayed immediately)
-- Idempotency key prevents accidental duplicate submissions
-- "Upload & Process" button disables after first click to prevent double-submission
+- **Mode toggle**: "Single Invoice" or "Bulk Upload (up to 20 files)" — switch with one click
+- Drag-and-drop or click-to-browse file selection (PDF, JPEG, PNG — max 20 MB per file)
+- **Bulk mode**: file list with per-file remove, total size, and "Add More Files" button
+- **Non-blocking upload**: HTTP 202 returns instantly — blob upload + pipeline run in background thread pool
+- Idempotency key prevents accidental duplicate submissions (single mode)
+- "Upload & Process" / "Upload N Files" button disables after first click to prevent double-submission
 - Clear button resets the form for a new upload
 
 ---
 
 ### 4. ⚙️ Processing in Progress
-> After upload, the background pipeline runs asynchronously. The UI polls every 2 seconds and displays a live status indicator.
+> After upload, the background pipeline runs asynchronously. The UI polls every 2–3 seconds and displays a live status indicator.
 
 ![Processing](docs/screenshots/proccesig.png)
 
@@ -83,6 +85,8 @@
 - Animated spinner while Azure AI processes the document
 - Non-blocking — user can navigate away and return; status updates on re-visit
 - Processing time displayed on completion (e.g. `18.7s`)
+- **Batch monitoring page** (`/invoices/batch/:id`): progress bar, stats, and live-updating table for bulk uploads
+- **Completion toast**: automatic notification when all invoices in a batch finish processing
 
 ---
 
@@ -182,13 +186,20 @@
 ## 🔄 Processing Pipeline
 
 ```
-User uploads PDF / JPEG / PNG
+User uploads PDF / JPEG / PNG (single or up to 20 files in bulk)
             │
             ▼
-   POST /invoices/upload
-   ├─ Idempotency check (SHA-256 key dedup)
-   ├─ Upload to Azure Blob Storage (private)
-   └─ Trigger BackgroundTask (non-blocking)
+   POST /invoices/upload (single)  ─── or ─── POST /invoices/upload/bulk (batch)
+   ├─ Validate file type, size, magic bytes
+   ├─ Idempotency check (SHA-256 key dedup — single mode)
+   ├─ Create Invoice DB record (status="processing")
+   └─ Return HTTP 202 immediately (< 1 second)
+            │
+    ┌───────┴───────┐  (background thread pool — max 10 workers)
+    │               │
+    ▼               ▼
+   Upload to        Upload to
+   Azure Blob       Azure Blob (per file in batch)
             │
             ▼
    ┌─────────────────────────────┐
@@ -214,6 +225,11 @@ User uploads PDF / JPEG / PNG
             ├─ confidence ≥ 0.90 ──► AUTO_APPROVED ✅
             ├─ confidence 0.60–0.90 ─► NEEDS_REVIEW ⚠️
             └─ confidence < 0.60 ───► HUMAN_REQUIRED 🔴
+            │
+            ▼
+   Webhook Notifications
+   ├─ invoice.completed  (per invoice)
+   └─ batch.completed    (when all invoices in batch finish)
 ```
 
 ---
@@ -308,11 +324,16 @@ npm run dev
 | `POST` | `/auth/register` | Register new user |
 | `POST` | `/auth/login` | Login → JWT tokens |
 | `POST` | `/auth/refresh` | Refresh access token |
-| `POST` | `/invoices/upload` | Upload invoice file |
+| `POST` | `/invoices/upload` | Upload single invoice (non-blocking, HTTP 202) |
+| `POST` | `/invoices/upload/bulk` | Upload up to 20 invoices in one batch (HTTP 202) |
+| `GET` | `/invoices/batch/{batch_id}` | Live batch processing status |
 | `GET` | `/invoices/` | List invoices (paginated + filtered) |
 | `GET` | `/invoices/stats` | Dashboard statistics |
 | `GET` | `/invoices/{id}` | Invoice detail + fresh SAS URL |
 | `DELETE` | `/invoices/{id}` | Delete invoice + blob |
+| `POST` | `/invoices/{id}/reprocess` | Re-run pipeline on existing invoice |
+| `GET` | `/invoices/export/csv` | Streaming CSV export |
+| `GET` | `/invoices/export/xlsx` | XLSX export (10K row cap) |
 | `GET` | `/review/queue` | Pending human review queue |
 | `POST` | `/review/{id}/submit` | Submit review decision |
 | `GET` | `/health` | DB + Azure + QR library health |
@@ -358,9 +379,9 @@ Redivivus-invoiceai/
 │   └── .env                        # Local env vars (gitignored)
 ├── frontend/                       # React + TypeScript + Vite
 │   ├── src/
-│   │   ├── pages/                  # Dashboard · Upload · Invoices · Review · Detail
-│   │   ├── components/             # InvoicePreviewPanel · ReviewModal · FileDropzone
-│   │   ├── hooks/                  # useInvoiceStatus · useUploadInvoice · useReviewQueue
+│   │   ├── pages/                  # Dashboard · Upload · Invoices · Review · Detail · BatchStatus
+│   │   ├── components/             # InvoicePreviewPanel · ReviewModal · FileDropzone (bulk mode)
+│   │   ├── hooks/                  # useInvoiceStatus · useUploadInvoice · useBulkUpload · useBatchStatus
 │   │   ├── store/                  # Zustand auth store
 │   │   ├── api/                    # Axios client with JWT interceptors
 │   │   └── utils/                  # IST formatters · URL resolver
