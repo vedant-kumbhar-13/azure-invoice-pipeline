@@ -1,7 +1,8 @@
 import uuid
-from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Text, JSON, Integer
+from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Text, JSON, Integer, Date
 from sqlalchemy.sql import func
 from app.database import Base
+
 
 class Invoice(Base):
     __tablename__ = "invoices"
@@ -10,6 +11,7 @@ class Invoice(Base):
     user_id = Column(String(36), ForeignKey("users.id"))
     status = Column(String, default="processing")
     original_filename = Column(String)
+
     # BUG-D2: TECH DEBT — this column stores a blob_name (e.g. "a1b2c3d4.pdf"),
     # NOT a URL. The column name is kept as file_url to avoid a data migration
     # right now, but a future migration should:
@@ -20,9 +22,9 @@ class Invoice(Base):
     raw_json = Column(Text)
     data_json = Column(JSON)
     confidence = Column(Float)
-    error_detail = Column(String, nullable=True)   
+    error_detail = Column(String, nullable=True)
 
-    source_type = Column(String, nullable=True) # GST_EINVOICE, GST_PDF, NON_GST, HANDWRITTEN, UNKNOWN
+    source_type = Column(String, nullable=True)     # GST_EINVOICE, GST_PDF, NON_GST, HANDWRITTEN, UNKNOWN
     ingestion_method = Column(String, nullable=True) # QR, OCR, HUMAN
     gst_rules_json = Column(JSON, nullable=True)
     idempotency_key = Column(String(64), nullable=True, unique=True, index=True)
@@ -32,3 +34,23 @@ class Invoice(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     # BUG-11: Added server_default so updated_at is never NULL on initial insert
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # ── Payment tracking fields (added for payment feature) ──────────────────
+    #
+    # payment_direction: auto-detected by payment_service by comparing the
+    # invoice's seller_gstin / buyer_gstin against the user's org_gstin.
+    #   RECEIVABLE  → our org is the seller  (money coming IN)
+    #   PAYABLE     → our org is the buyer   (money going OUT)
+    #   UNKNOWN     → org_gstin not set or GSTIN not found in invoice data
+    # Users can always override this manually via PATCH /invoices/{id}/payment.
+    payment_direction = Column(String(12), nullable=True, index=True)
+    # default=None: extracted from invoice data_json by payment_service if
+    # present (field: "due_date" or "payment_terms"). Otherwise set manually.
+    payment_due_date = Column(Date, nullable=True, index=True)
+
+    # Counterparty = the other party on this invoice.
+    # For RECEIVABLE: counterparty is the buyer.
+    # For PAYABLE:    counterparty is the seller/vendor.
+    # These are denormalised from data_json for fast querying without JSON parsing.
+    counterparty_name = Column(String(255), nullable=True)
+    counterparty_gstin = Column(String(15), nullable=True, index=True)
