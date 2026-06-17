@@ -3,6 +3,7 @@ import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient } from '../api/client';
+import { NotificationBell } from '../components/NotificationBell';
 import {
   Home,
   UploadCloud,
@@ -12,7 +13,8 @@ import {
   LogOut,
   Menu,
   X,
-  Bell,
+  Wallet,
+  BellRing,
 } from 'lucide-react';
 
 // ─── Nav Config ─────────────────────────────────────────────
@@ -21,6 +23,9 @@ const navItems = [
   { name: 'Upload',        path: '/upload',       icon: UploadCloud },
   { name: 'Invoices',      path: '/invoices',     icon: FileText },
   { name: 'Review Queue',  path: '/review-queue', icon: ShieldAlert, badge: true },
+  // [NEW] Payment tracking
+  { name: 'Payments',      path: '/payments',     icon: Wallet },
+  { name: 'Reminders',     path: '/reminders',    icon: BellRing },
   { name: 'Settings',      path: '/settings',     icon: SlidersHorizontal },
 ];
 
@@ -30,11 +35,14 @@ const pageTitles: Record<string, string> = {
   '/upload':       'Upload Invoice',
   '/invoices':     'Invoice History',
   '/review-queue': 'Review Queue',
+  '/payments':     'Payments',
+  '/reminders':    'Reminders',
   '/settings':     'Settings',
 };
 
 function getPageTitle(pathname: string): string {
   if (pathname.startsWith('/invoices/')) return 'Invoice Detail';
+  if (pathname.startsWith('/payments/')) return 'Payment Detail';
   return pageTitles[pathname] || 'InvoiceAI';
 }
 
@@ -168,13 +176,8 @@ export const DashboardLayout = () => {
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Notification bell */}
-            <button className="relative p-2 rounded-lg text-ink-400 hover:text-ink-700 hover:bg-ink-100 transition-colors">
-              <Bell className="h-[18px] w-[18px]" />
-              {pendingCount > 0 && (
-                <span className="absolute top-1.5 right-1.5 h-2 w-2 bg-red-500 rounded-full" />
-              )}
-            </button>
+            {/* [NEW] Payment reminder notification bell */}
+            <NotificationBell />
 
             {/* User avatar */}
             <div className="h-8 w-8 rounded-full bg-ink-900 text-white flex items-center justify-center text-xs font-bold uppercase cursor-default">
