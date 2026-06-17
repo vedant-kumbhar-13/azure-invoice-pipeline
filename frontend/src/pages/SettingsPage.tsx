@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../api/client';
 import { useAuthStore } from '../store/authStore';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
-import { Copy, Check, Trash2, Plus, Loader2, Eye, EyeOff, Zap, FileSpreadsheet, ServerCrash, Globe } from 'lucide-react';
+import { Copy, Check, Trash2, Plus, Loader2, Eye, EyeOff, Zap, FileSpreadsheet, ServerCrash, Globe, Building2, Save } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
   AlertDialog,
@@ -36,10 +36,78 @@ export const SettingsPage = () => {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [webhookTests, setWebhookTests] = useState<Record<string, {status: 'loading' | 'success' | 'failed', message?: string}>>({});
 
+  // ── [NEW] Organisation profile form state ──────────────────────────────
+  const [orgName, setOrgName] = useState('');
+  const [orgGstin, setOrgGstin] = useState('');
+  const [orgAddress, setOrgAddress] = useState('');
+  const [orgEmail, setOrgEmail] = useState('');
+  const [gstinError, setGstinError] = useState<string | null>(null);
+
   const { data: userProfile } = useQuery<any>({
     queryKey: ['user_profile'],
     queryFn: async () => { const r = await apiClient.get('/auth/me'); return r.data; },
   });
+
+  // ── [NEW] Fetch org profile (includes org_gstin etc.) ──────────────────
+  const { data: orgProfile, isLoading: loadingOrgProfile } = useQuery<any>({
+    queryKey: ['org_profile'],
+    queryFn: async () => { const r = await apiClient.get('/auth/profile'); return r.data; },
+  });
+
+  // Populate form once org profile loads
+  useEffect(() => {
+    if (orgProfile) {
+      setOrgName(orgProfile.org_name || '');
+      setOrgGstin(orgProfile.org_gstin || '');
+      setOrgAddress(orgProfile.org_address || '');
+      setOrgEmail(orgProfile.org_email || '');
+    }
+  }, [orgProfile]);
+
+  // ── [NEW] Save org profile mutation ─────────────────────────────────────
+  const updateOrgProfile = useMutation({
+    mutationFn: async () => {
+      const payload: Record<string, string> = {};
+      // Send empty string as undefined so backend doesn't reject with
+      // "must be exactly 15 characters" when the field is intentionally cleared
+      if (orgName.trim()) payload.org_name = orgName.trim();
+      if (orgGstin.trim()) payload.org_gstin = orgGstin.trim().toUpperCase();
+      if (orgAddress.trim()) payload.org_address = orgAddress.trim();
+      if (orgEmail.trim()) payload.org_email = orgEmail.trim();
+
+      const res = await apiClient.put('/auth/profile', payload);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org_profile'] });
+      toast.success('Organisation profile saved.');
+      setGstinError(null);
+    },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail;
+      // Pydantic validation errors come back as { detail: "Validation error", errors: [...] }
+      const errors = err?.response?.data?.errors;
+      let message = 'Failed to save organisation profile.';
+      if (Array.isArray(errors) && errors.length > 0) {
+        message = errors.map((e: any) => e.message).join(' ');
+      } else if (typeof detail === 'string') {
+        message = detail;
+      }
+      setGstinError(message);
+      toast.error(message);
+    },
+  });
+
+  const handleSaveOrgProfile = () => {
+    setGstinError(null);
+
+    if (orgGstin.trim() && orgGstin.trim().length !== 15) {
+      setGstinError('GSTIN must be exactly 15 characters.');
+      return;
+    }
+
+    updateOrgProfile.mutate();
+  };
 
   const { data: webhooks, isLoading: loadingHooks } = useQuery<any[]>({
     queryKey: ['webhooks'],
@@ -207,6 +275,118 @@ export const SettingsPage = () => {
                </div>
             </div>
 
+         </div>
+      </section>
+
+      {/* SECTION 1b — [NEW] Organisation Profile (GSTIN for payment direction detection) */}
+      <section className="space-y-4">
+         <div>
+           <h2 className="text-lg font-bold text-ink-900">Organisation Profile</h2>
+           <p className="text-sm text-ink-500 mt-1">
+             Set your organisation's GSTIN to automatically detect whether processed
+             invoices are <span className="font-semibold text-emerald-600">receivable</span> (you are the seller)
+             or <span className="font-semibold text-rose-600">payable</span> (you are the buyer).
+           </p>
+         </div>
+
+         <div className="bg-white rounded-xl border border-ink-200 shadow-sm p-6 space-y-6">
+            {loadingOrgProfile ? (
+              <div className="flex justify-center py-4">
+                <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                   <div>
+                     <label className="block text-xs font-bold text-ink-500 uppercase tracking-widest mb-2">
+                       Organisation Name
+                     </label>
+                     <Input
+                       as="input"
+                       value={orgName}
+                       onChange={(e: any) => setOrgName(e.target.value)}
+                       placeholder="e.g. Acme Industries Pvt Ltd"
+                     />
+                   </div>
+
+                   <div>
+                     <label className="block text-xs font-bold text-ink-500 uppercase tracking-widest mb-2">
+                       GSTIN
+                     </label>
+                     <Input
+                       as="input"
+                       value={orgGstin}
+                       onChange={(e: any) => setOrgGstin(e.target.value.toUpperCase())}
+                       placeholder="15-character GSTIN e.g. 27AAPFU0939F1ZV"
+                       maxLength={15}
+                       className="font-mono tracking-wider"
+                     />
+                     <p className="text-[11px] text-ink-400 mt-1.5">
+                       {orgGstin.length}/15 characters
+                     </p>
+                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                   <div>
+                     <label className="block text-xs font-bold text-ink-500 uppercase tracking-widest mb-2">
+                       Organisation Address
+                     </label>
+                     <Input
+                       as="input"
+                       value={orgAddress}
+                       onChange={(e: any) => setOrgAddress(e.target.value)}
+                       placeholder="Registered business address"
+                     />
+                   </div>
+
+                   <div>
+                     <label className="block text-xs font-bold text-ink-500 uppercase tracking-widest mb-2">
+                       Organisation Email
+                     </label>
+                     <Input
+                       as="input"
+                       type="email"
+                       value={orgEmail}
+                       onChange={(e: any) => setOrgEmail(e.target.value)}
+                       placeholder="Used for payment reminder emails"
+                     />
+                     <p className="text-[11px] text-ink-400 mt-1.5">
+                       Defaults to your login email if left blank.
+                     </p>
+                   </div>
+                </div>
+
+                {gstinError && (
+                  <div className="px-4 py-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
+                    {gstinError}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-2 border-t border-ink-100">
+                  <div className="flex items-center gap-2 text-xs text-ink-400">
+                    <Building2 className="h-4 w-4" />
+                    <span>
+                      {orgProfile?.org_gstin
+                        ? 'Direction auto-detection is active for new uploads.'
+                        : 'Set GSTIN to enable automatic payment direction detection.'}
+                    </span>
+                  </div>
+                  <Button
+                    onClick={handleSaveOrgProfile}
+                    disabled={updateOrgProfile.isPending}
+                    className="font-bold shrink-0"
+                  >
+                    {updateOrgProfile.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    ) : (
+                      <Save className="h-4 w-4 mr-2" />
+                    )}
+                    {updateOrgProfile.isPending ? 'Saving...' : 'Save Profile'}
+                  </Button>
+                </div>
+              </>
+            )}
          </div>
       </section>
 

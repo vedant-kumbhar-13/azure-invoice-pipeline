@@ -15,12 +15,17 @@ import { InvoicesPage } from './pages/InvoicesPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { BatchStatusPage } from './pages/BatchStatusPage';
 
+// [NEW] Payment tracking pages
+import { PaymentsPage } from './pages/Payments';
+import { PaymentDetailPage } from './pages/PaymentDetail';
+import { RemindersPage } from './pages/Reminders';
+
 // Layout
 import { DashboardLayout } from './layouts/DashboardLayout';
 
 export const App = () => {
   const initFromStorage = useAuthStore((state) => state.initFromStorage);
-  
+
   useEffect(() => {
     initFromStorage();
   }, [initFromStorage]);
@@ -31,7 +36,7 @@ export const App = () => {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
-        
+
         <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/upload" element={<UploadPage />} />
@@ -39,9 +44,15 @@ export const App = () => {
             <Route path="/invoices/batch/:batchId" element={<BatchStatusPage />} />
             <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
             <Route path="/review-queue" element={<ReviewQueuePage />} />
+
+            {/* [NEW] Payment tracking routes */}
+            <Route path="/payments" element={<PaymentsPage />} />
+            <Route path="/payments/:id" element={<PaymentDetailPage />} />
+            <Route path="/reminders" element={<RemindersPage />} />
+
             <Route path="/settings" element={<SettingsPage />} />
         </Route>
-        
+
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </>
