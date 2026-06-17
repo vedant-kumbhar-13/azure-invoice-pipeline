@@ -47,10 +47,13 @@ opencv-contrib-python==4.9.0.80
 # zxing-cpp is Layer 1 QR decoder: self-contained Windows wheel, no external DLL required.
 # Best Windows-native barcode/QR library — replaces pyzbar (Linux libzbar dependency).
 zxing-cpp==2.2.0
-Pillow==10.3.0
-pymupdf==1.24.0
+Pillow==12.2.0
 openpyxl==3.1.2
 redis==5.0.4
+numpy==1.26.4
+pymupdf==1.24.11
+APScheduler==3.10.4
+
 # NumPy must stay < 2.0: opencv-contrib-python 4.9.x uses numpy.core.multiarray
 # which was removed in NumPy 2.0, causing '_ARRAY_API not found' at import.
-numpy==1.26.4
+

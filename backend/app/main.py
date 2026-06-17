@@ -5,6 +5,9 @@ BUG-15: Hardened CORS + HSTS headers.
 BUG-16: Stuck invoice cleanup background task.
 BUG-17: Content-Length limit middleware (20MB).
 BUG-21: pyzbar startup health check.
+
+[NEW] Payment reminder scheduler (APScheduler) — runs reminder_service.run_reminder_scan()
+every settings.REMINDER_SCHEDULER_INTERVAL_HOURS hours.
 """
 import asyncio
 import logging
@@ -22,7 +25,9 @@ from pathlib import Path
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.routers import auth, invoices, review, webhooks
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from app.routers import auth, invoices, review, webhooks, payments, reminders
 
 logger = logging.getLogger("invoiceai")
 
@@ -35,19 +40,29 @@ _qr_detection_ok = True
 # thread exhaustion under concurrent uploads.
 _pipeline_executor = ThreadPoolExecutor(max_workers=10, thread_name_prefix="invoice-pipeline")
 
+# ── [NEW] Global scheduler instance for payment reminders ───────────────────
+_reminder_scheduler: AsyncIOScheduler | None = None
+
 
 # ── BUG-16: Lifespan — startup/shutdown tasks ─────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup checks + background cleanup tasks."""
-    global _qr_detection_ok
+    global _qr_detection_ok, _reminder_scheduler
 
     # Ensure all models are imported so SQLAlchemy creates tables
     from app.models.invoice import Invoice  # noqa: F401
     from app.models.user import User  # noqa: F401
     from app.models.review_log import ReviewLog  # noqa: F401
     from app.models.vendor_correction import VendorCorrection  # noqa: F401
+    from app.models.payment import (  # noqa: F401
+        PaymentRecord,
+        PaymentTransaction,
+        ReminderSettings,
+        ReminderLog,
+        InAppNotification,
+    )
     from app.database import engine, Base
     Base.metadata.create_all(bind=engine)
 
@@ -94,14 +109,42 @@ async def lifespan(app: FastAPI):
     # BUG-16: Start stuck invoice cleanup task
     cleanup_task = asyncio.create_task(_cleanup_stuck_invoices())
 
+    # ── [NEW] Start payment reminder scheduler ───────────────────────────────
+    # Runs reminder_service.run_reminder_scan() every
+    # settings.REMINDER_SCHEDULER_INTERVAL_HOURS hours (default 6).
+    # Also runs once shortly after startup (60s delay) so reminders aren't
+    # delayed by a full interval on a fresh restart.
+    from app.config import settings as app_settings
+
+    _reminder_scheduler = AsyncIOScheduler(timezone="UTC")
+    _reminder_scheduler.add_job(
+        _run_reminder_scan_job,
+        trigger="interval",
+        hours=app_settings.REMINDER_SCHEDULER_INTERVAL_HOURS,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
+        id="payment_reminder_scan",
+        replace_existing=True,
+        max_instances=1,  # never run two scans concurrently
+    )
+    _reminder_scheduler.start()
+    logger.info(
+        f"[startup] Payment reminder scheduler started — "
+        f"runs every {app_settings.REMINDER_SCHEDULER_INTERVAL_HOURS}h "
+        f"(first run in 60s)"
+    )
+
     yield
 
-    # Shutdown: cancel background tasks
+    # ── Shutdown: cancel background tasks ─────────────────────────────────────
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    if _reminder_scheduler is not None:
+        _reminder_scheduler.shutdown(wait=False)
+        logger.info("[shutdown] Payment reminder scheduler stopped")
 
 
 async def _cleanup_stuck_invoices():
@@ -130,6 +173,32 @@ async def _cleanup_stuck_invoices():
                 db.close()
         except Exception as e:
             logger.error(f"[cleanup] Stuck invoice cleanup error: {e}")
+
+
+async def _run_reminder_scan_job():
+    """
+    [NEW] APScheduler job wrapper for reminder_service.run_reminder_scan().
+
+    Runs the (synchronous, DB-bound) reminder scan in the bounded thread pool
+    so it doesn't block the asyncio event loop.
+    """
+    from app.database import SessionLocal
+    from app.services.reminder_service import run_reminder_scan
+
+    loop = asyncio.get_event_loop()
+
+    def _scan():
+        db = SessionLocal()
+        try:
+            return run_reminder_scan(db)
+        finally:
+            db.close()
+
+    try:
+        summary = await loop.run_in_executor(_pipeline_executor, _scan)
+        logger.info(f"[scheduler] Reminder scan finished: {summary}")
+    except Exception as e:
+        logger.error(f"[scheduler] Reminder scan job failed: {e}", exc_info=True)
 
 
 # ───────────────────────────────────────────────
@@ -264,6 +333,8 @@ app.include_router(auth.router)
 app.include_router(invoices.router)
 app.include_router(review.router)
 app.include_router(webhooks.router)
+app.include_router(payments.router)    # [NEW] payment tracking
+app.include_router(reminders.router)   # [NEW] reminders + notifications
 
 @app.get("/")
 def root():
@@ -302,6 +373,11 @@ def health():
     except Exception:
         azure_status = "not_configured"
 
+    # [NEW] Reminder scheduler status
+    reminder_status = "running" if (
+        _reminder_scheduler is not None and _reminder_scheduler.running
+    ) else "stopped"
+
     overall = "ok" if db_status == "ok" else "degraded"
 
     return {
@@ -312,5 +388,7 @@ def health():
         "azure_ai": azure_status,
         # BUG-21: Report QR detection library status
         "qr_detection": "ok" if _qr_detection_ok else "disabled (see startup log)",
+        # [NEW] Report reminder scheduler status
+        "reminder_scheduler": reminder_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

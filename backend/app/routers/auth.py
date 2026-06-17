@@ -2,6 +2,9 @@
 Auth router for InvoiceAI.
 
 BUG-06: JWT refresh tokens + 60 min access token + httpOnly cookie.
+
+[NEW] Org profile endpoints — GET/PUT /auth/profile for org_gstin etc.
+      Used by payment_service to auto-detect payment direction.
 """
 import os
 import hashlib
@@ -11,7 +14,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models.user import User
-from app.schemas.auth import UserCreate, UserResponse, TokenResponse
+from app.schemas.auth import (
+    UserCreate, UserResponse, TokenResponse,
+    OrgProfileUpdate, UserProfileResponse,
+)
 from app.services.auth_service import (
     hash_password, verify_password, create_jwt, generate_api_key,
     create_refresh_token, decode_refresh_token, hash_token,
@@ -148,4 +154,38 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+# ── [NEW] Organisation profile endpoints ──────────────────────────────────────
+# Used by the payment tracking feature: org_gstin lets payment_service
+# auto-detect whether an invoice is a RECEIVABLE or PAYABLE by comparing
+# it against the invoice's vendor_gstin / buyer_gstin.
+
+@router.get("/profile", response_model=UserProfileResponse)
+def get_profile(current_user: User = Depends(get_current_user)):
+    """Return the current user's full profile including org details."""
+    return current_user
+
+
+@router.put("/profile", response_model=UserProfileResponse)
+def update_profile(
+    payload: OrgProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update organisation details (name, GSTIN, address, email).
+
+    Setting org_gstin enables automatic payment direction detection for
+    all future invoice uploads. Existing invoices are not retroactively
+    updated — reprocess them if you want direction detection applied.
+    """
+    update_data = payload.model_dump(exclude_unset=True)
+
+    for field, value in update_data.items():
+        setattr(current_user, field, value)
+
+    db.commit()
+    db.refresh(current_user)
     return current_user
