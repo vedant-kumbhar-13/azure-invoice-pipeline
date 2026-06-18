@@ -11,6 +11,10 @@ import {
   BellOff,
   Trash2,
   FileText,
+  Mail,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react';
 import { Skeleton } from '../components/ui/skeleton';
 import { PaymentStatusBadge, PaymentDirectionBadge } from '../components/PaymentStatusBadge';
@@ -46,6 +50,9 @@ export const PaymentDetailPage = () => {
   const snoozeReminders = useSnoozeReminders();
 
   const [showAddTxn, setShowAddTxn] = useState(false);
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [emailInput, setEmailInput] = useState('');
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -87,6 +94,37 @@ export const PaymentDetailPage = () => {
 
   const handleSnooze = async (days: number) => {
     await snoozeReminders.mutateAsync({ paymentRecordId: payment.id, snoozeDays: days });
+  };
+
+  const startEditEmail = () => {
+    setEmailInput(payment.counterparty_email || '');
+    setEmailError(null);
+    setEditingEmail(true);
+  };
+
+  const cancelEditEmail = () => {
+    setEditingEmail(false);
+    setEmailError(null);
+  };
+
+  const saveEmail = async () => {
+    const trimmed = emailInput.trim();
+    if (trimmed && (!trimmed.includes('@') || !trimmed.split('@')[1]?.includes('.'))) {
+      setEmailError('Enter a valid email address.');
+      return;
+    }
+    try {
+      await updatePayment.mutateAsync({
+        paymentId: payment.id,
+        data: { counterparty_email: trimmed || undefined } as any,
+      });
+      setEditingEmail(false);
+      setEmailError(null);
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setEmailError(detail || 'Failed to save email.');
+    }
   };
 
   return (
@@ -193,6 +231,72 @@ export const PaymentDetailPage = () => {
               </div>
             </div>
           )}
+
+          {/* Counterparty email — editable. Used as the reminder recipient
+              for RECEIVABLE payments; informational only for PAYABLE. */}
+          <div className="flex items-start gap-3 sm:col-span-2">
+            <Mail className="h-4 w-4 text-ink-400 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-xs text-ink-500 uppercase tracking-wide font-medium">
+                Counterparty Email
+              </p>
+
+              {!editingEmail ? (
+                <div className="flex items-center gap-2 mt-0.5">
+                  <p className="text-sm text-ink-900">
+                    {payment.counterparty_email || (
+                      <span className="text-ink-400 italic">Not set</span>
+                    )}
+                  </p>
+                  <button
+                    onClick={startEditEmail}
+                    className="text-ink-400 hover:text-blue-600 transition-colors"
+                    title="Edit counterparty email"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-1">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="email"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      placeholder="counterparty@example.com"
+                      autoFocus
+                      className="flex-1 max-w-xs px-2.5 py-1.5 rounded-lg border border-ink-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                      onClick={saveEmail}
+                      disabled={updatePayment.isPending}
+                      className="p-1.5 rounded-lg bg-emerald-100 text-emerald-700 hover:bg-emerald-200 transition-colors disabled:opacity-50"
+                      title="Save"
+                    >
+                      <Check className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={cancelEditEmail}
+                      className="p-1.5 rounded-lg bg-ink-100 text-ink-600 hover:bg-ink-200 transition-colors"
+                      title="Cancel"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {emailError && (
+                    <p className="text-xs text-red-600 mt-1.5">{emailError}</p>
+                  )}
+                </div>
+              )}
+
+              <p className="text-[11px] text-ink-400 mt-1.5">
+                {payment.direction === 'RECEIVABLE'
+                  ? 'Reminder emails are sent here (falls back to your org email if blank).'
+                  : 'Informational only — reminders for payables always go to your org email.'}
+              </p>
+            </div>
+          </div>
+
           {payment.manual_invoice_ref && (
             <div className="flex items-start gap-3">
               <Hash className="h-4 w-4 text-ink-400 mt-0.5" />
