@@ -4,13 +4,15 @@
 
 # ⚡ Azure Invoice Pipeline — Enterprise GST Processing
 
-**Automate GST invoice ingestion · QR decoding · OCR extraction · Compliance validation · Human review**
+**Automate GST invoice ingestion · QR decoding · OCR extraction · Compliance validation · Payment tracking · Reminders**
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.135-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react)](https://react.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react)](https://react.dev/)
 [![Azure AI](https://img.shields.io/badge/Azure-Document%20Intelligence-0078D4?style=flat-square&logo=microsoftazure)](https://azure.microsoft.com/)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python)](https://python.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript)](https://typescriptlang.org/)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python)](https://python.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript)](https://typescriptlang.org/)
+[![Neon](https://img.shields.io/badge/Neon-PostgreSQL-3ECF8E?style=flat-square&logo=postgresql)](https://neon.tech/)
+[![Deploy](https://img.shields.io/badge/Deploy-Render%20%2B%20Vercel-46E3B7?style=flat-square)](https://render.com/)
 
 </div>
 
@@ -25,7 +27,9 @@
 - ✅ **GST Compliance Engine** — validates GSTIN, tax math, line items, and place of supply
 - 📊 **Confidence Scoring** — per-field confidence with visual indicators
 - 👤 **Human Review Workflow** — side-by-side PDF viewer + editable form for flagged invoices
-- 🔒 **Security-First Architecture** — SAS-tokenised blob access, JWT auth, SSRF protection
+- 💰 **Payment Tracking** — auto-creates payment records from approved invoices with direction detection (Payable/Receivable)
+- 🔔 **Smart Reminders** — in-app + email reminders for upcoming due dates (configurable schedule)
+- 🔒 **Security-First Architecture** — SAS-tokenised blob access, JWT auth with httpOnly refresh, SSRF protection
 
 ---
 
@@ -38,7 +42,8 @@
 
 **Features:**
 - Email/password login with validation
-- Secure JWT access token (30 min) + refresh token (7 days)
+- Secure JWT access token (60 min) + refresh token (7 days, httpOnly cookie)
+- Password strength enforcement (8+ chars, uppercase, digit, special character)
 - Register new account with organisation details
 - Auto-redirect after successful login
 
@@ -69,8 +74,7 @@
 - **Bulk mode**: file list with per-file remove, total size, and "Add More Files" button
 - **Non-blocking upload**: HTTP 202 returns instantly — blob upload + pipeline run in background thread pool
 - Idempotency key prevents accidental duplicate submissions (single mode)
-- "Upload & Process" / "Upload N Files" button disables after first click to prevent double-submission
-- Clear button resets the form for a new upload
+- Magic bytes validation prevents disguised file uploads
 
 ---
 
@@ -82,11 +86,10 @@
 **Features:**
 - Live status badge: `PROCESSING` → `AUTO_APPROVED` / `NEEDS_REVIEW` / `HUMAN_REQUIRED`
 - 10-minute polling timeout with automatic escalation to `HUMAN_REQUIRED`
-- Animated spinner while Azure AI processes the document
-- Non-blocking — user can navigate away and return; status updates on re-visit
+- Backend cleanup task marks stuck invoices after 15 minutes
 - Processing time displayed on completion (e.g. `18.7s`)
-- **Batch monitoring page** (`/invoices/batch/:id`): progress bar, stats, and live-updating table for bulk uploads
-- **Completion toast**: automatic notification when all invoices in a batch finish processing
+- **Batch monitoring page**: progress bar, stats, and live-updating table for bulk uploads
+- Auto-creates PaymentRecord for approved invoices with direction detection
 
 ---
 
@@ -97,12 +100,11 @@
 
 **Features:**
 - Server-side filtering by status: All · Processing · Auto-Approved · Needs Review · Failed
-- Full-text search by filename, vendor name, invoice number, or GSTIN
+- Full-text search across vendor name, invoice number, GSTIN, and filename
 - Confidence bar per row (green · amber · red colour coding)
 - **👁 Eye icon** → opens the slide-out `InvoicePreviewPanel` without navigating away
 - **↗ External link icon** → navigates to the full Invoice Detail page
-- **🗑 Trash icon** → delete with confirmation dialog
-- Highlighted selected row in blue when preview panel is open
+- **🗑 Trash icon** → delete with confirmation dialog (also deletes Azure blob)
 - 20 items per page with Prev/Next pagination
 
 ---
@@ -114,71 +116,73 @@
 
 **Features:**
 - **Left pane (55%)** — PDF rendered inline via Azure SAS URL (no download triggered)
-- **Right pane (45%)** — all extracted fields with per-field confidence bars:
-  - Vendor Name & GSTIN · Buyer Name & GSTIN
-  - Invoice Number & Date
-  - CGST · SGST · IGST · Grand Total
+- **Right pane (45%)** — all extracted fields with per-field confidence bars
 - Animated confidence ring showing overall score
 - GST compliance flags shown in red if any violations detected
-- Close with ✕, Escape key, or click outside — or open Full Detail with ↗
+- Close with ✕, Escape key, or click outside
 
 ---
 
 ### 7. 🛡️ Review Queue
-> Centralised queue for all invoices flagged for human attention, sorted by urgency (HUMAN_REQUIRED first, then NEEDS_REVIEW).
+> Centralised queue for all invoices flagged for human attention, sorted by urgency.
 
 ![Review Queue](docs/screenshots/REVIEW_PAGE.png)
 
 **Features:**
 - Priority-sorted queue: `HUMAN_REQUIRED` (red) → `NEEDS_REVIEW` (amber)
 - Confidence score and GST compliance flags shown per card
-- Red badge in sidebar navigation shows pending count (updates every 30 seconds)
-- Click any card to open the full Human Override modal
-- Queue auto-refreshes after each review decision
+- Three review actions: ✅ Approve As-Is · 💾 Save Edits · ❌ Reject
+- Diff-only audit logging for edited reviews
+- Vendor corrections cache — future invoices from the same vendor auto-apply corrections
 
 ---
 
-### 8. ✍️ Human Override Modal
-> When an invoice needs human intervention, this full-screen modal shows the original document alongside an editable form.
+### 8. 💰 Payment Tracking *(NEW)*
+> Auto-creates payment records from approved invoices with intelligent direction detection.
 
-**Features (from the same Human Review screenshot above):**
-- **Left panel** — original invoice PDF rendered inline (SAS URL with `Content-Disposition: inline`)
-- **Right panel** — pre-populated editable form:
-  - Vendor Name, Vendor GSTIN (with format validation)
-  - Invoice Number, Invoice Date
-  - Total Amount, CGST, SGST, IGST
-- Three action buttons:
-  - ✅ **Approve As-Is** — mark as VERIFIED without edits
-  - 💾 **Save Form Edits** — correct data and mark as VERIFIED
-  - ❌ **Reject** — mark as REJECTED with optional notes
-- Full audit log entry written on every decision (diff-only for EDITED)
+**Features:**
+- **Auto-detection**: compares invoice GSTIN against org profile to determine Payable vs Receivable
+- Payment dashboard with stat cards (Total Outstanding · Overdue · Paid)
+- Record partial and full payments with transaction history
+- Filter by direction (Payable/Receivable), status (Pending/Partial/Paid/Overdue)
+- Manual payment creation for invoices not in the system
 
 ---
 
-### 9. ⚙️ Settings Page
-> Manage your account, API keys, and webhook integrations.
+### 9. 🔔 Smart Reminders *(NEW)*
+> Never miss a payment deadline with configurable in-app and email reminders.
+
+**Features:**
+- Background scheduler runs every 6 hours (configurable) to scan for due payments
+- Immediate scan on invoice upload for near-term due dates
+- In-app notification bell with unread count
+- Email reminders via configurable SMTP (Gmail, Outlook, or custom)
+- Per-user customisable reminder schedule (e.g., 7, 3, 1 days before due date)
+
+---
+
+### 10. ⚙️ Settings Page
+> Manage your account, API keys, organisation profile, and webhook integrations.
 
 ![Settings](docs/screenshots/SETTINGS.png)
 
 **Features:**
-- Account information display (email, organisation)
+- Organisation profile (name, GSTIN, address, email) for payment direction auto-detection
 - API key management (generate, view, revoke)
-- Webhook endpoint configuration — register URLs for invoice processing events
-- Webhook event filtering (select which status changes trigger callbacks)
-- Delivery log for webhook history
+- Webhook endpoint configuration with event filtering and delivery logs
+- Reminder settings — customise notification schedule and email preferences
 
 ---
 
-### 10. 📊 Excel Export
+### 11. 📊 Excel Export
 > Download all processed invoice data as a structured Excel file for accounting and ERP workflows.
 
 ![Excel Export](docs/screenshots/EXEL_DATA.png)
 
 **Features:**
-- Single-click export from the Invoices or Settings page
-- All fields exported: Vendor, GSTIN, Invoice #, Date, Line Items, CGST, SGST, IGST, Total
-- Confidence scores included per field
-- Status column for audit trail
+- **CSV**: Streaming export with batch processing (handles unlimited records)
+- **XLSX**: Formatted export with bold headers, auto-column widths, and 10,000 row cap
+- All fields exported: Vendor, GSTIN, Invoice #, Date, Amounts, Confidence, Status
 - Compatible with Microsoft Excel, Google Sheets, and accounting tools
 
 ---
@@ -208,7 +212,7 @@ User uploads PDF / JPEG / PNG (single or up to 20 files in bulk)
    │  Layer 2: OpenCV WeChat ML  │         │
    │  Layer 3: OpenCV Standard   │         │ YES → Parse JWT
    └─────────────────────────────┘         │         confidence = 1.0
-            │ NO QR found                  │         status = AUTO_APPROVED
+            │ NO QR found                  │
             ▼                              │
    Azure Document Intelligence OCR         │
    └─ Extract: Vendor · GSTIN ·            │
@@ -216,15 +220,26 @@ User uploads PDF / JPEG / PNG (single or up to 20 files in bulk)
       · CGST · SGST · IGST · Total
             │
             ▼
+   Vendor Corrections Cache
+   └─ Apply prior human corrections for same vendor
+            │
+            ▼
    GST Compliance Engine
-   ├─ GSTIN format + checksum
-   ├─ Tax math: CGST+SGST+IGST = Total
+   ├─ GSTIN format + Luhn checksum
+   ├─ Tax math: CGST+SGST vs IGST (place of supply)
    ├─ Line-item subtotal cross-check
-   └─ Invoice date range validation
+   └─ Invoice date range (configurable, default 3 years)
             │
             ├─ confidence ≥ 0.90 ──► AUTO_APPROVED ✅
             ├─ confidence 0.60–0.90 ─► NEEDS_REVIEW ⚠️
             └─ confidence < 0.60 ───► HUMAN_REQUIRED 🔴
+            │
+            ▼
+   Auto-create PaymentRecord (if approved)
+   └─ Direction: PAYABLE / RECEIVABLE / UNKNOWN
+            │
+            ▼
+   Immediate Reminder Scan (for near-term due dates)
             │
             ▼
    Webhook Notifications
@@ -237,13 +252,13 @@ User uploads PDF / JPEG / PNG (single or up to 20 files in bulk)
 ## 🛠️ Technology Stack
 
 | Layer | Technology | Version |
-|-------|-----------|---------| 
+|-------|-----------|---------|
 | **Backend API** | FastAPI | 0.135 |
 | **ORM** | SQLAlchemy | 2.0 |
 | **DB Migrations** | Alembic | 1.18 |
-| **Database** | SQLite (dev) / PostgreSQL (prod) | — |
-| **Frontend** | React + TypeScript + Vite | 18 / 5 |
-| **State Management** | TanStack Query (React Query) | v5 |
+| **Database** | SQLite (dev) / Neon PostgreSQL (prod) | 16 |
+| **Frontend** | React + TypeScript + Vite | 19 / 5.9 / 8 |
+| **State Management** | TanStack Query + Zustand | v5 |
 | **Styling** | Tailwind CSS | v3 |
 | **Cloud — OCR** | Azure Document Intelligence | 1.0.2 SDK |
 | **Cloud — Storage** | Azure Blob Storage | 12.28 SDK |
@@ -252,14 +267,17 @@ User uploads PDF / JPEG / PNG (single or up to 20 files in bulk)
 | **QR Layer 3** | OpenCV Standard QR | 4.9.0 |
 | **PDF Rendering** | PyMuPDF (fitz) | 1.24 |
 | **Auth** | python-jose (JWT) + Passlib (bcrypt) | — |
-| **Export** | openpyxl | 3.1 |
+| **Scheduler** | APScheduler | 3.10 |
+| **Rate Limiting** | Redis (prod) / In-memory (dev) | 5.0 |
+| **Export** | openpyxl (XLSX) + csv (streaming) | 3.1 |
+| **Deployment** | Render (backend) + Vercel (frontend) | — |
 
 ---
 
 ## ⚙️ Quick Start — Local Setup
 
 ### Prerequisites
-- Python 3.11 or 3.12 · Node.js 18+ · Git
+- Python 3.11+ · Node.js 18+ · Git
 - Azure account with **Document Intelligence** and **Blob Storage** resources
 
 ### 1. Clone
@@ -286,7 +304,6 @@ AZURE_STORAGE_CONTAINER_NAME=invoices-test
 DATABASE_URL=sqlite:///./invoiceai.db
 JWT_SECRET=your_secure_256bit_random_secret_string_here
 ENVIRONMENT=dev
-INVOICE_DATE_MAX_AGE_DAYS=1095
 ```
 
 > ⚠️ **Important:** `JWT_SECRET` must be **at least 32 characters** long. Generate one with:
@@ -294,20 +311,15 @@ INVOICE_DATE_MAX_AGE_DAYS=1095
 > python -c "import secrets; print(secrets.token_hex(32))"
 > ```
 
-### 4. Database Migrations
-```bash
-cd backend
-alembic upgrade head
-```
-
-### 5. Start Backend
+### 4. Start Backend
 ```bash
 cd backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 # API docs → http://localhost:8001/docs
+# Health → http://localhost:8001/health
 ```
 
-### 6. Start Frontend
+### 5. Start Frontend
 ```bash
 cd frontend
 npm install
@@ -317,26 +329,69 @@ npm run dev
 
 ---
 
+## 🚀 Production Deployment (Render + Vercel + Neon)
+
+### Database — Neon PostgreSQL
+1. Create a project at [neon.tech](https://neon.tech)
+2. Copy the **pooled connection string**
+
+### Backend — Render
+1. Create a **Web Service** at [render.com](https://render.com)
+2. **Root Directory:** `backend` · **Runtime:** Python 3
+3. **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2`
+4. Add environment variables:
+
+| Variable | Value |
+|----------|-------|
+| `DATABASE_URL` | Neon PostgreSQL connection string |
+| `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT` | Your Azure AI endpoint |
+| `AZURE_DOCUMENT_INTELLIGENCE_KEY` | Your Azure AI key |
+| `AZURE_STORAGE_CONNECTION_STRING` | Your Azure Storage connection string |
+| `JWT_SECRET` | New 64-char hex secret |
+| `ENVIRONMENT` | `production` |
+| `FRONTEND_URL` | Your Vercel URL (e.g., `https://invoiceai.vercel.app`) |
+| `EMAIL_ENABLED` | `false` (until SMTP configured) |
+
+### Frontend — Vercel
+1. Import the repo at [vercel.com](https://vercel.com)
+2. **Root Directory:** `frontend` · **Framework:** Vite
+3. Set environment variable: `VITE_API_URL` = your Render backend URL
+
+> **Important:** After deploying both, go back to Render and set `FRONTEND_URL` to your Vercel URL for CORS.
+
+---
+
 ## 🌐 API Reference
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/auth/register` | Register new user |
 | `POST` | `/auth/login` | Login → JWT tokens |
-| `POST` | `/auth/refresh` | Refresh access token |
-| `POST` | `/invoices/upload` | Upload single invoice (non-blocking, HTTP 202) |
-| `POST` | `/invoices/upload/bulk` | Upload up to 20 invoices in one batch (HTTP 202) |
+| `POST` | `/auth/refresh` | Refresh access token (httpOnly cookie) |
+| `POST` | `/auth/logout` | Logout + revoke refresh token |
+| `GET` | `/auth/profile` | Get user profile + org details |
+| `PUT` | `/auth/profile` | Update org details (GSTIN for payment detection) |
+| `POST` | `/invoices/upload` | Upload single invoice (HTTP 202) |
+| `POST` | `/invoices/upload/bulk` | Upload up to 20 invoices (HTTP 202) |
 | `GET` | `/invoices/batch/{batch_id}` | Live batch processing status |
-| `GET` | `/invoices/` | List invoices (paginated + filtered) |
+| `GET` | `/invoices/` | List invoices (paginated + search + filter) |
 | `GET` | `/invoices/stats` | Dashboard statistics |
 | `GET` | `/invoices/{id}` | Invoice detail + fresh SAS URL |
-| `DELETE` | `/invoices/{id}` | Delete invoice + blob |
-| `POST` | `/invoices/{id}/reprocess` | Re-run pipeline on existing invoice |
+| `DELETE` | `/invoices/{id}` | Delete invoice + Azure blob |
+| `POST` | `/invoices/{id}/reprocess` | Re-run full pipeline (QR + OCR) |
 | `GET` | `/invoices/export/csv` | Streaming CSV export |
 | `GET` | `/invoices/export/xlsx` | XLSX export (10K row cap) |
 | `GET` | `/review/queue` | Pending human review queue |
 | `POST` | `/review/{id}/submit` | Submit review decision |
-| `GET` | `/health` | DB + Azure + QR library health |
+| `GET` | `/payments/` | List payment records |
+| `GET` | `/payments/{id}` | Payment detail + transactions |
+| `POST` | `/payments/{id}/transactions` | Record a payment transaction |
+| `POST` | `/payments/manual` | Create manual payment record |
+| `GET` | `/reminders/settings` | Get reminder preferences |
+| `PUT` | `/reminders/settings` | Update reminder schedule |
+| `GET` | `/reminders/notifications` | Get in-app notifications |
+| `POST` | `/webhooks` | Register webhook endpoint |
+| `GET` | `/health` | DB + Azure + QR + scheduler health |
 
 ---
 
@@ -344,83 +399,71 @@ npm run dev
 
 | Control | Implementation |
 |---------|---------------|
-| **Authentication** | Stateless JWT (30 min access + 7 day refresh) |
-| **Passwords** | bcrypt hashing via Passlib |
+| **Authentication** | JWT access token (60 min) + refresh token (7 days, httpOnly cookie) |
+| **Token Storage** | In-memory Zustand store — never persisted to localStorage |
+| **Passwords** | bcrypt hashing + server-side complexity validation |
 | **Blob Access** | Time-limited SAS URLs (1 hr) — raw Azure URLs never exposed |
-| **File Preview** | `Content-Disposition: inline` prevents auto-download |
-| **Uploads** | 20 MB Content-Length limit middleware |
+| **File Validation** | Extension check → magic bytes → Content-Length middleware (20 MB) |
 | **Deduplication** | SHA-256 idempotency key per upload |
-| **SSRF Protection** | External URL downloads capped at 5 MB |
-| **CORS** | Explicit allowed-origin list only |
-| **Rate Limiting** | Redis-backed per-user limits |
+| **SSRF Protection** | DNS resolution + private IP denylist for webhook URLs |
+| **CORS** | Environment-bound allowed origins (fails loudly in production if misconfigured) |
+| **Security Headers** | HSTS · X-Content-Type-Options · X-Frame-Options · Cache-Control: no-store |
+| **Rate Limiting** | Redis-backed per-user limits with in-memory fallback |
+| **Error Handling** | Correlation IDs in responses — raw DB/stack traces never exposed |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-Redivivus-invoiceai/
-├── backend/                        # FastAPI backend
+azure-invoice-pipeline/
+├── backend/                          # FastAPI backend
 │   ├── app/
-│   │   ├── main.py                 # App entry, middleware, lifespan tasks
-│   │   ├── config.py               # Pydantic settings (reads .env)
-│   │   ├── database.py             # SQLAlchemy engine + session
-│   │   ├── routers/                # auth · invoices · review · webhooks
-│   │   ├── models/                 # SQLAlchemy ORM models
-│   │   ├── schemas/                # Pydantic request/response schemas
-│   │   ├── services/               # pipeline · qr_detector · azure_ai · blob_storage
-│   │   ├── middleware/             # JWT auth · rate limiting
-│   │   └── utils/                  # datetime_utils.py (UTC-aware IST serialisation)
-│   ├── alembic/                    # DB migration scripts
-│   ├── alembic.ini                 # Alembic configuration
-│   ├── scripts/                    # seed_demo_data.py
-│   ├── requirements.txt            # Python dependencies
-│   ├── .env.example                # Environment variable template
-│   └── .env                        # Local env vars (gitignored)
-├── frontend/                       # React + TypeScript + Vite
+│   │   ├── main.py                   # App entry, middleware, lifespan, scheduler
+│   │   ├── config.py                 # Pydantic settings (reads .env)
+│   │   ├── database.py               # SQLAlchemy engine + connection pooling
+│   │   ├── routers/                  # auth · invoices · review · webhooks · payments · reminders
+│   │   ├── models/                   # invoice · user · payment · review_log · webhook
+│   │   ├── schemas/                  # Pydantic request/response schemas
+│   │   ├── services/                 # pipeline · qr_detector · azure_ai · blob_storage
+│   │   │                              payment_service · reminder_service · webhook_service
+│   │   ├── middleware/               # JWT auth · rate limiting (Redis + fallback)
+│   │   └── utils/                    # datetime_utils.py
+│   ├── alembic/                      # DB migration scripts
+│   ├── Dockerfile                    # Multi-stage production Docker build
+│   ├── docker-compose.yml            # Local dev with PostgreSQL + Redis
+│   ├── requirements.txt              # Python dependencies
+│   ├── start.sh                      # Startup script (dev/production modes)
+│   └── .env.example                  # Environment variable template
+├── frontend/                         # React 19 + TypeScript + Vite
 │   ├── src/
-│   │   ├── pages/                  # Dashboard · Upload · Invoices · Review · Detail · BatchStatus
-│   │   ├── components/             # InvoicePreviewPanel · ReviewModal · FileDropzone (bulk mode)
-│   │   ├── hooks/                  # useInvoiceStatus · useUploadInvoice · useBulkUpload · useBatchStatus
-│   │   ├── store/                  # Zustand auth store
-│   │   ├── api/                    # Axios client with JWT interceptors
-│   │   └── utils/                  # IST formatters · URL resolver
+│   │   ├── pages/                    # Dashboard · Upload · Invoices · Review · Payments · Reminders
+│   │   ├── components/               # PreviewPanel · ReviewModal · FileDropzone · NotificationBell
+│   │   ├── hooks/                    # useInvoiceStatus · usePayments · useReminders · useNotifications
+│   │   ├── store/                    # Zustand auth store (memory-only tokens)
+│   │   ├── api/                      # Axios client with JWT refresh interceptor
+│   │   └── types/                    # TypeScript type definitions
 │   ├── package.json
 │   ├── vite.config.ts
-│   ├── tailwind.config.js
-│   └── .env.local                  # VITE_API_URL (gitignored)
+│   ├── .env.production               # Production API URL template
+│   └── .env.example                  # Local dev env template
 ├── docs/
-│   ├── screenshots/                # Application screenshots for README
-│   ├── guides/                     # Implementation & bug-fix guides
-│   └── sample-invoices/            # Sample PDF invoices for testing
+│   ├── screenshots/                  # Application screenshots
+│   ├── guides/                       # Implementation & bug-fix documentation
+│   └── sample-invoices/              # Sample PDFs for testing
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
-## 🛡️ Production Hardening & Security Features
-
-The platform has been extensively hardened for production deployments:
-
-| Area | Feature |
-|------|---------|
-| **Core Architecture** | Fully Dockerised with multi-worker Uvicorn and PostgreSQL. Bounded thread-pool executors prevent event-loop blocking during heavy OCR loads. |
-| **Data Privacy** | Health endpoints redact infrastructure errors. Raw internal blob names are never exposed; the frontend exclusively uses time-limited SAS URLs. |
-| **Authentication** | Secure, httpOnly cookies for refresh tokens. JWT access tokens are kept in memory (Zustand) and never persisted to localStorage to prevent XSS exfiltration. |
-| **API Security** | Strict CORS configurations with environment-bound allowed origins. Webhook signatures use raw secret HMAC validation with Pydantic minimum length constraints. |
-| **Cost Optimisation** | Smart QR detector pre-checks extensions and caps PDF downloads to 1MB (first page only) to prevent massive egress costs on non-QR invoices. |
-| **Resilience** | Redis-backed rate limiting with graceful fallback to in-memory deque limits. Automated schema migrations on startup. Database constraints prevent registration race conditions. |
-
----
-
 ## 📄 License
 
-MIT License © 2026 Sumit Patil / Redivivus Technologies
+MIT License © 2026
 
 ---
 
 <div align="center">
   <sub>⚡ Built for Indian GST compliance · Powered by Azure AI Document Intelligence</sub><br/>
-  <sub>🔒 Security-hardened · 🌏 IST timezone-aware · 🪟 Windows-native QR decoding</sub>
+  <sub>🔒 Security-hardened · 💰 Payment tracking · 🔔 Smart reminders · 🪟 Windows-native QR decoding</sub>
 </div>
