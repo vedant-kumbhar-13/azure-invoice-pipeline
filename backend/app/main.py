@@ -63,8 +63,13 @@ async def lifespan(app: FastAPI):
         ReminderLog,
         InAppNotification,
     )
-    from app.database import engine, Base
-    Base.metadata.create_all(bind=engine)
+    from app.database import engine, Base, is_sqlite
+
+    # Only use create_all() for SQLite (local dev / tests).
+    # For PostgreSQL, Alembic is the authoritative migration tool;
+    # calling create_all() on an existing PG database raises DuplicateTable.
+    if is_sqlite:
+        Base.metadata.create_all(bind=engine)
 
     # BUG-B6: Auto-run Alembic migrations on every startup.
     # This eliminates the "forgotten migration" class of deploy failures.
