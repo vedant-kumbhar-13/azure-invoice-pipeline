@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Loader2, CheckCircle2, XCircle, AlertCircle, Check } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, Check } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { apiClient } from '../api/client';

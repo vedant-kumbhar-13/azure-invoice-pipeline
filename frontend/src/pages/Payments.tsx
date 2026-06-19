@@ -44,7 +44,7 @@ export const PaymentsPage = () => {
   const { data: stats, isLoading: statsLoading } = usePaymentStats();
 
   const { data: paymentsData, isLoading: listLoading } = usePayments({
-    direction: direction === 'All' ? undefined : direction,
+    direction: direction === 'All' ? undefined : direction as 'RECEIVABLE' | 'PAYABLE',
     status: status === 'All' ? undefined : status,
     search: search.trim() || undefined,
     page,
