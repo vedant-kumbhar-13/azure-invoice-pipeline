@@ -5,7 +5,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { GSTRulesPanel } from '../components/GSTRulesPanel';
 import { LineItemsTable } from '../components/LineItemsTable';
 import { formatDate, formatCurrency } from '../utils/formatters';
-import { resolveFileUrl } from '../utils/url';
+
 import { AlertTriangle, Copy, Check, ArrowRight } from 'lucide-react';
 import toast from 'react-hot-toast';
 
